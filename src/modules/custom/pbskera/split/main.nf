@@ -11,7 +11,7 @@ Distributed under the terms of the Apache License, Version 2.0.
 
 process PBSKERA_SPLIT {
     tag "$meta.id"
-    label 'process_medium'
+    label 'process_extreme'
 
     conda "${moduleDir}/environment.yml"
     container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
@@ -26,7 +26,6 @@ process PBSKERA_SPLIT {
     tuple val(meta), path("*skera.bam")               , emit: bam
     tuple val(meta), path("*.skera.bam.pbi")          , emit: pbi
     tuple val(meta), path("*.non_passing.bam")        , emit: non_passing_bam
-    tuple val(meta), path("*.non_passing_bam.pbi")    , emit: non_passing_pbi
     tuple val(meta), path("*.found_adapters.csv.gz")  , emit: found_adapters
     tuple val(meta), path("*.summary.csv")            , emit: summary
     tuple val(meta), path("*.summary.json")           , emit: summary_json
@@ -65,7 +64,6 @@ process PBSKERA_SPLIT {
     touch *found_adapters.csv.gz
     touch *summary.json
     touch *skera.bam.pbi
-    touch *non_passing.bam.pbi
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
