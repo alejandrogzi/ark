@@ -26,7 +26,8 @@ process ISOTOOLS_TRUNCATION_DETECTOR {
         --ref $bed \\
         --query $bed \\
         --threads ${task.cpus} \\
-        --prefix ${prefix}
+        --prefix ${prefix} \\
+        -O cds
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
