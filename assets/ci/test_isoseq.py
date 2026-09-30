@@ -21,6 +21,7 @@ name, args = Path(sys.argv[0]).name, sys.argv[1:]
 if '--version' in args:
     print(name + ' ' + (' '.join(args[:-1]) + ' ' if name == 'isoseq' else '') + 'test')
     sys.exit(0)
+pairs = json.loads(os.environ['TEST_PRIMER_PAIRS'])
 sam = '@HD\tVN:1.6\n' + ''.join(f'r{i}\t4\t*\t0\t0\t*\t*\t0\t0\tACGT\t*\tis:i:{i}\n' for i in (1, 2))
 def outputs(bam):
     Path(bam).write_text(sam)
@@ -33,8 +34,8 @@ if name == 'pbindex':
 elif name == 'lima':
     assert Path(args[0] + '.pbi').is_file()
     stem = args[2].removesuffix('.bam')
-    for i in range(1, int(os.environ['TEST_BARCODES']) + 1):
-        outputs(f'{stem}.IsoSeqX_bc{i:02}_5p--IsoSeqX_3p.bam')
+    for pair in pairs:
+        outputs(f'{stem}.{pair}.bam')
     for suffix in ('counts', 'report', 'summary'):
         Path(stem + '.lima.' + suffix).touch()
 elif name == 'isoseq' and args[0] == 'refine':
@@ -44,7 +45,7 @@ elif name == 'isoseq' and args[0] == 'refine':
 elif name == 'isoseq' and args[0] == 'cluster2':
     bams = Path(args[1]).read_text().splitlines()
     assert bams and all(Path(bam).is_file() and bam.endswith('_flnc.bam') for bam in bams), bams
-    assert len(bams) == (int(os.environ['TEST_BARCODES']) if args[2].startswith('pooled') else 1), bams
+    assert len(bams) == (len(pairs) if args[2].startswith('pooled') else 1), bams
     outputs(args[2])
     Path(args[2].removesuffix('.bam') + '.cluster_report.csv').touch()
 elif name == 'samtools':
@@ -123,13 +124,16 @@ workflow {
     environment = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}", NXF_OFFLINE="true", NXF_ANSI_LOG="false")
     base = [NEXTFLOW, "-C", f"{ROOT}/src/nextflow.config,{config}", "run"]
 
-    for entrypoint, mode, count in (("refine", "per_sample", 2), ("refine", "multi_sample", 2),
-                                    ("refine", "both", 2), ("refine", "per_sample", 1),
-                                    ("ccs", "per_sample", 1), ("ccs", "both", 2)):
-        case = temporary / f"{entrypoint}-{mode}-{count}"
+    isoseqx = [f"IsoSeqX_bc{i:02}_5p--IsoSeqX_3p" for i in (1, 2)]
+    neb = ["NEB_5p--NEB_Clontech_3p", "NEB_5p--primer_3p"]
+    for entrypoint, mode, pairs in (("refine", "per_sample", isoseqx), ("refine", "multi_sample", isoseqx),
+                                    ("refine", "both", isoseqx), ("refine", "per_sample", isoseqx[:1]),
+                                    ("ccs", "per_sample", isoseqx[:1]), ("ccs", "both", isoseqx),
+                                    ("refine", "both", neb), ("ccs", "both", neb)):
+        case = temporary / f"{entrypoint}-{mode}-{pairs[0]}-{len(pairs)}"
         inputs = case / "02_LIMA"
         inputs.mkdir(parents=True)
-        stems = [f"movie.part.hifi_fl.IsoSeqX_bc{i:02}_5p--IsoSeqX_3p" for i in range(1, count + 1)]
+        stems = [f"movie.part.hifi_fl.{pair}" for pair in pairs]
         for i, stem in enumerate(stems if entrypoint == "refine" else ["movie.part.hifi"]):
             (inputs / f"{stem}.bam").touch()
             if i == 0:
@@ -137,9 +141,10 @@ workflow {
         (inputs / "ignored.consensusreadset.xml").touch()
         (inputs / "ignored.lima.report").touch()
         primers = case / "primers.fasta"
-        primers.write_text(">IsoSeqX_bc01_5p\nACGT\n>IsoSeqX_3p\nACGT\n")
+        names = dict.fromkeys(primer for pair in pairs for primer in pair.split("--"))
+        primers.write_text("".join(f">{name}\nACGT\n" for name in names))
         calls = case / "calls.jsonl"
-        environment.update(TEST_BARCODES=str(count), TEST_CALLS=str(calls))
+        environment.update(TEST_PRIMER_PAIRS=json.dumps(pairs), TEST_CALLS=str(calls))
         command = base + [str(harness), "--global_input_dir", str(inputs), "--global_primers", str(primers),
                           "--global_output_dir", str(case / "results"), "--isoseq_cluster2_mode", mode,
                           "--entrypoint", entrypoint]
@@ -147,17 +152,32 @@ workflow {
                                 stderr=subprocess.STDOUT, timeout=120)
         assert result.returncode == 0, result.stdout
         actual = {line.split("\t")[1] for line in result.stdout.splitlines() if line.startswith("RESULT\t")}
-        samples = {f"movie.part.hifi.bc{i:02}" for i in range(1, count + 1)}
+        samples = {f"movie.part.hifi.{pair}" for pair in pairs}
         expected = (samples if mode != "multi_sample" else set()) | ({"pooled"} if mode != "per_sample" else set())
         assert actual == expected, (actual, expected, result.stdout)
         records = [json.loads(line) for line in calls.read_text().splitlines()]
         refine = [args for name, args in records if name == "isoseq" and args[0] == "refine"]
         cluster = [args for name, args in records if name == "isoseq" and args[0] == "cluster2"]
-        assert len(refine) == count, refine
+        assert len(refine) == len(pairs), refine
         assert len(cluster) == len(expected), cluster
         assert sum(name == "lima" for name, _ in records) == (entrypoint == "ccs")
-        assert sum(name == "pbindex" for name, _ in records) == (entrypoint == "refine" and count > 1)
-        print(f"PASS {entrypoint}: {mode}, {count} barcode(s)", flush=True)
+        assert sum(name == "pbindex" for name, _ in records) == (entrypoint == "refine" and len(pairs) > 1)
+        print(f"PASS {entrypoint}: {mode}, {', '.join(pairs)}", flush=True)
+
+    # A checkpoint without a primer-pair suffix must fail before refinement.
+    case = temporary / "invalid-lima-name"
+    case.mkdir()
+    (case / "movie.part.hifi_fl.NEB_5p.bam").touch()
+    (case / "movie.part.hifi_fl.NEB_5p.bam.pbi").touch()
+    calls = case / "calls.jsonl"
+    environment.update(TEST_CALLS=str(calls))
+    result = subprocess.run(base + [str(harness), "--entrypoint", "refine", "--global_input_dir", str(case),
+                                   "--global_primers", str(primers)],
+                            cwd=case, env=environment, text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, timeout=120)
+    assert result.returncode != 0 and "Unexpected LIMA BAM name: movie.part.hifi_fl.NEB_5p.bam" in result.stdout, result.stdout
+    assert not calls.exists(), calls.read_text()
+    print("PASS malformed LIMA filename rejected before refinement", flush=True)
 
     # Exercise the actual CLI validator for the refine checkpoint and invalid entrypoints.
     for start, diagnostic in (("refine", "missing required --global_primers"),

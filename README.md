@@ -88,15 +88,17 @@ nextflow run src/main.nf -params-file src/params.json -profile docker \
 
 The `refine` checkpoint reads every `*.bam` and its matching `*.bam.pbi`, creating
 missing indexes, and skips CCS, Skera, and LIMA. Each BAM is refined independently,
-preserving its barcode group.
+preserving its primer-pair group. BAM names must end in
+`.<5p_primer>--<3p_primer>.bam`.
 
 `isoseq_cluster2_mode` controls clustering of those refined reads: `per_sample`
-keeps each input barcode group separate; `multi_sample` clusters all groups
+keeps each input primer-pair group separate; `multi_sample` clusters all groups
 together under `global_prefix`; `both` produces both sets using the same refined
-reads. Barcode IDs such as `bc01` remain part of the sample ID throughout the
-pipeline. Their tissue names depend on your experimental barcode assignments;
-the pipeline does not infer them. Each input BAM/primer pair is treated as a
-separate sample, including when files come from different sequencing runs.
+reads. Sample IDs retain the full primer pair, for example
+`movie.IsoSeqX_bc01_5p--IsoSeqX_3p` or `movie.NEB_5p--NEB_Clontech_3p`.
+Their tissue names depend on your experimental barcode assignments; the pipeline
+does not infer them. Each input BAM/primer pair is treated as a separate sample,
+including when files come from different sequencing runs.
 
 A helper sh script is provided to run the pipeline on a SLURM cluster. See details below.
 

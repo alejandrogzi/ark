@@ -201,16 +201,14 @@ workflow ISOSEQ {
 
       // Keep one item per primer/barcode pair for both fresh runs and checkpoints.
       ch_lima_out_bams = ch_lima_out_bams.map { meta, bam, pbi ->
-          def stem = bam.baseName
-          def matcher = stem =~ /IsoSeqX_(bc\d+)_5p--IsoSeqX_3p$/
-          def barcode = matcher.find() ? matcher.group(1) : stem
+          def matcher = bam.baseName =~ /^(.*)\.([^.]+--[^.]+)$/
+          if (!matcher.matches()) error "Unexpected LIMA BAM name: ${bam.name}"
+
+          def pair = matcher.group(2)
           def parent = entrypoint == 'refine'
-              ? stem.replaceFirst(/\.[^.]+--[^.]+$/, '').replaceFirst(/_fl$/, '')
+              ? matcher.group(1).replaceFirst(/_fl$/, '')
               : meta.id
-          def sample_id = entrypoint == 'refine' && barcode == stem
-              ? stem
-              : "${parent}.${barcode}"
-          tuple(meta + [ parent_id: parent, id: sample_id, barcode: barcode ], bam, pbi)
+          tuple(meta + [ parent_id: parent, id: "${parent}.${pair}", barcode: pair ], bam, pbi)
       }
 
       /*
