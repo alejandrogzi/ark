@@ -29,7 +29,7 @@ process ISOSEQ_CLUSTER2 {
     script:
     def args = task.ext.args ?: ''
     def prefix = task.ext.prefix ?: "${meta.id}"
-    def reads = bam.size() > 1 ? "${bam.join(' ')}" : "${bam[0]}"
+    def reads = bam instanceof List ? bam.join(' ') : bam
     def fofn = "${prefix}.flnc.fofn"
    """
     echo "$reads" | tr ' ' '\n' > $fofn

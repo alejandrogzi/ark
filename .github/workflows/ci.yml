@@ -28,6 +28,10 @@ jobs:
           curl -fsSL https://get.nextflow.io | bash
           sudo mv nextflow /usr/local/bin/
 
+      - name: Check Iso-Seq checkpoints and sample modes
+        if: matrix.entrypoint == 'subreads'
+        run: python3 assets/ci/test_isoseq.py
+
       - name: Run pipeline
         env:
           D: "${{ github.workspace }}/assets/test_data/data"

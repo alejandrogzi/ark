@@ -36,7 +36,7 @@ include { DIAMOND_MAKEDB } from '../../modules/custom/diamond/makedb/main.nf'
 
 workflow PREPROCESSING {
     take:
-      entrypoint             // [ subreads, ccs, flnc ]
+      entrypoint             // [ subreads, ccs, refine, flnc ]
       global_input_dir       // path
       global_primers         // path
       genome                 // path
@@ -311,13 +311,13 @@ workflow PREPROCESSING {
 
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-          ENTRYPOINTS [ subreads, ccs, flnc ]
+          ENTRYPOINTS [ subreads, ccs, refine, flnc ]
      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
       // INFO: isoseq entrypoint
       ch_reads = Channel.empty()
-      if (entrypoint == "subreads" || entrypoint == "ccs") {
+      if (entrypoint in ['subreads', 'ccs', 'refine']) {
           ISOSEQ(
               global_input_dir,
               global_primers,
@@ -338,6 +338,7 @@ workflow PREPROCESSING {
                   return [
                       [
                           id:         fastx.baseName,
+                          sample_id:  fastx.name.replaceFirst(/(?:\.(?:hq|singletons))?\.fast[aq](?:\.gz)?$/, ''),
                           single_end: true,
                           singleton:  singleton
                       ],

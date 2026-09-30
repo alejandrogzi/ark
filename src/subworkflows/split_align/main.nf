@@ -67,6 +67,10 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
       ch_versions              // [ meta, versions.yml ]
 
     main:
+      ch_reads = ch_reads.map { meta, reads ->
+          [ meta + [ sample_id: meta.sample_id ?: meta.id ], reads ]
+      }
+
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
           CHUNKING [ isoseq, map ]
@@ -448,16 +452,13 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
                   [ meta + [ chr: it.name.split('@')[0] ], it ]
               }
           }
-          // INFO: fmt -> chr1@pooled.hq.bed OR chr1@pooled.extended.hq.bed
           .map { meta, bed ->
-              def sampleId = bed.name.split('@')[1].split('\\.')[0]  // → "pooled"
-              [ [ meta.chr, sampleId ], meta, bed ]
+              [ [ meta.chr, meta.sample_id ], meta, bed ]
           }
           .groupTuple(by: 0)
-          .map { chr, metas, beds ->
+          .map { key, metas, beds ->
               def meta = metas[0]
-              def sampleId = beds[0].name.split('@')[1].split('\\.')[0]  // → "pooled"
-              def group_meta = [ id: sampleId, single_end: true, chr: meta.chr ]
+              def group_meta = [ id: meta.sample_id, single_end: true, chr: meta.chr ]
               [ group_meta, beds ]
           }
           .set { ch_aligned_segmented_hq_per_chr }
