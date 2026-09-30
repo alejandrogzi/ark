@@ -1,6 +1,6 @@
 {
     "_comment": "Copy this file, fill in your paths, and pass it with: nextflow run main.nf -params-file my_params.json",
-    "// 1)": "Entrypoint / Global input options [ entrypoint: subreads, ccs, flnc ] ───────────────────────────────────",
+    "// 1)": "Entrypoint / Global input options [ entrypoint: subreads, ccs, refine, flnc ] ───────────────────────────────────",
     "entrypoint": "subreads",
     "global_input_dir": "",
     "global_output_dir": "",

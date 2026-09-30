@@ -77,6 +77,27 @@ nextflow run main.nf -profile test,apptainer
 > [!NOTE]
 > You can also specify these options directly in `params.json`.
 
+To restart from LIMA outputs, point the input at `02_LIMA` and provide the same
+primer FASTA used for demultiplexing:
+
+```bash
+nextflow run src/main.nf -params-file src/params.json -profile docker \
+  --entrypoint refine --global_input_dir /path/to/02_LIMA \
+  --global_primers /path/to/primers.fasta
+```
+
+The `refine` checkpoint reads every `*.bam` and its matching `*.bam.pbi`, creating
+missing indexes, and skips CCS, Skera, and LIMA. Each BAM is refined independently,
+preserving its barcode group.
+
+`isoseq_cluster2_mode` controls clustering of those refined reads: `per_sample`
+keeps each input barcode group separate; `multi_sample` clusters all groups
+together under `global_prefix`; `both` produces both sets using the same refined
+reads. Barcode IDs such as `bc01` remain part of the sample ID throughout the
+pipeline. Their tissue names depend on your experimental barcode assignments;
+the pipeline does not infer them. Each input BAM/primer pair is treated as a
+separate sample, including when files come from different sequencing runs.
+
 A helper sh script is provided to run the pipeline on a SLURM cluster. See details below.
 
 <details>

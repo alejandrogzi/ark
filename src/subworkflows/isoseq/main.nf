@@ -9,8 +9,6 @@ include { PBCCS } from '../../modules/nf-core/pbccs/main.nf'
 include { PBTK_PBINDEX as PBINDEX } from '../../modules/nf-core/pbtk/pbindex/main.nf'
 
 include { PBTK_PBMERGE as PBMERGE } from '../../modules/nf-core/pbtk/pbmerge/main.nf'
-include { PBTK_PBMERGE as PBMERGE_MULTI_SAMPLE } from '../../modules/nf-core/pbtk/pbmerge/main.nf'
-include { PBTK_PBMERGE as PBMERGE_MULTI_LIMA } from '../../modules/nf-core/pbtk/pbmerge/main.nf'
 
 include { PBSKERA_SPLIT } from '../../modules/custom/pbskera/split/main.nf'
 include { WGET as WGET_SKERA_PRIMERS } from '../../modules/nf-core/wget/main.nf'
@@ -36,16 +34,16 @@ workflow ISOSEQ {
       ccs_chunk              // int
       isoseq_cluster2_mode   // string
       prefix                 // string
-      entrypoint             // [ subreads, ccs ] (flnc unreachable)
+      entrypoint             // [ subreads, ccs, refine ] (flnc unreachable)
       is_kinnex_library      // bool
 
     main:
       ch_versions = Channel.empty()
-      ch_primers = Channel.value(file(global_primers))
+      ch_primers = Channel.value(file(global_primers, checkIfExists: true))
 
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-          CHANNELING/INDEXING [ SUBREADS, CCS ]
+          CHANNELING/INDEXING [ SUBREADS, CCS, LIMA OUTPUTS ]
      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
@@ -92,10 +90,11 @@ workflow ISOSEQ {
           }.set { ch_bam_reindexed }
 
       ch_bam = ch_bam_branched.indexed.mix(ch_bam_reindexed)
+      ch_versions = ch_versions.mix(PBINDEX.out.versions)
 
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-          ENTRYPOINT BRANCHING  [ SUBREADS, CCS ]
+          ENTRYPOINT BRANCHING  [ SUBREADS, CCS, REFINE ]
      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
   
@@ -135,7 +134,6 @@ workflow ISOSEQ {
           ch_ccs_bams = PBMERGE.out.bam.join(PBMERGE.out.pbi)
 
           ch_versions = ch_versions.mix(PBMERGE.out.versions)
-          ch_versions = ch_versions.mix(PBINDEX.out.versions)
           ch_versions = ch_versions.mix(PBCCS.out.versions)
 
         break
@@ -144,9 +142,13 @@ workflow ISOSEQ {
           ch_ccs_bams = ch_bam
         break
 
+        case 'refine':
+          // LIMA BAMs are already demultiplexed and primer-trimmed.
+        break
+
         default:
           error """
-          ERROR: Unknown entrypoint -> options are at this step are: ccs, flnc
+          ERROR: Unknown entrypoint -> options at this step are: subreads, ccs, refine
           """.stripIndent()
           System.exit(1)
       }
@@ -158,7 +160,7 @@ workflow ISOSEQ {
       */
 
       ch_skera_demux_bams = Channel.empty()
-      if (is_kinnex_library) {
+      if (entrypoint != 'refine' && is_kinnex_library) {
         WGET_SKERA_PRIMERS(
           Channel.value(
             params.skera_kinnex_primers
@@ -183,60 +185,33 @@ workflow ISOSEQ {
       */
 
       ch_lima_out_bams = Channel.empty()
-      LIMA(ch_skera_demux_bams, ch_primers)  // INFO: remove primers from CCS
+      if (entrypoint == 'refine') {
+          ch_lima_out_bams = ch_bam
+      } else {
+          LIMA(ch_skera_demux_bams, ch_primers)
+          ch_lima_out_bams = LIMA.out.bam
+              .flatMap { meta, bams ->
+                  def bam_files = bams instanceof List ? bams : [bams]
+                  bam_files.collect { bam ->
+                      tuple(meta, bam, file("${bam}.pbi", checkIfExists: true))
+                  }
+              }
+          ch_versions = ch_versions.mix(LIMA.out.versions)
+      }
 
-      // Normalize BAM outputs to one channel item per BAM.
-      // Key: <original meta.id>::<BAM filename without .bam>
-      ch_lima_bams_keyed = LIMA.out.bam
-        .flatMap { meta, bams ->
-            def bam_files = bams instanceof List ? bams : [bams]
-
-            bam_files.collect { bam ->
-                def stem = bam.name.replaceFirst(/\.bam$/, '')
-
-                // Example:
-                // IsoSeqX_bc01_5p--IsoSeqX_3p -> bc01
-                def matcher = stem =~ /IsoSeqX_(bc\d+)_5p--IsoSeqX_3p$/
-                def barcode = matcher.find()
-                    ? matcher.group(1)
-                    : stem
-
-                def updated_meta = meta + [
-                    parent_id : meta.id,
-                    id        : "${meta.id}.${barcode}",
-                    barcode   : barcode
-                ]
-
-                tuple(
-                    "${meta.id}::${stem}",
-                    updated_meta,
-                    bam
-                )
-            }
-        }
-
-        // Normalize PBI outputs to one channel item per PBI.
-        // The stem must match the corresponding BAM stem.
-        ch_lima_pbis_keyed = LIMA.out.pbi
-            .flatMap { meta, pbis ->
-                def pbi_files = pbis instanceof List ? pbis : [pbis]
-
-                pbi_files.collect { pbi ->
-                    def stem = pbi.name.replaceFirst(/\.bam\.pbi$/, '')
-
-                    tuple(
-                        "${meta.id}::${stem}",
-                        pbi
-                    )
-                }
-            }
-
-        // Join each BAM to its corresponding .pbi
-        ch_lima_out_bams = ch_lima_bams_keyed
-            .join(ch_lima_pbis_keyed)
-            .map { key, updated_meta, bam, pbi ->
-                tuple(updated_meta, bam, pbi)
-            }
+      // Keep one item per primer/barcode pair for both fresh runs and checkpoints.
+      ch_lima_out_bams = ch_lima_out_bams.map { meta, bam, pbi ->
+          def stem = bam.baseName
+          def matcher = stem =~ /IsoSeqX_(bc\d+)_5p--IsoSeqX_3p$/
+          def barcode = matcher.find() ? matcher.group(1) : stem
+          def parent = entrypoint == 'refine'
+              ? stem.replaceFirst(/\.[^.]+--[^.]+$/, '').replaceFirst(/_fl$/, '')
+              : meta.id
+          def sample_id = entrypoint == 'refine' && barcode == stem
+              ? stem
+              : "${parent}.${barcode}"
+          tuple(meta + [ parent_id: parent, id: sample_id, barcode: barcode ], bam, pbi)
+      }
 
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -252,9 +227,9 @@ workflow ISOSEQ {
      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
-      // INFO: three possible modes: per_tissue, pan_tissue, both
+      // Refine each sample once; only clustering needs separate and pooled branches.
       ch_pbccs_merged_flnc_clustered_fa = Channel.empty()
-      if (isoseq_cluster2_mode == "per_sample") {
+      if (isoseq_cluster2_mode in ['per_sample', 'both']) {
         ISOSEQ_CLUSTER2(ISOSEQ_REFINE.out.bam) // INFO: cluster reads
         BAM_TO_FA(ISOSEQ_CLUSTER2.out.bam)
 
@@ -263,16 +238,17 @@ workflow ISOSEQ {
 
         ch_versions = ch_versions.mix(ISOSEQ_CLUSTER2.out.versions)
         ch_versions = ch_versions.mix(BAM_TO_FA.out.versions)
-      } else if (isoseq_cluster2_mode == "multi_sample") {
-        // INFO: collect all refined reads into a single channel for clustering
+      }
+
+      if (isoseq_cluster2_mode in ['multi_sample', 'both']) {
+        // cluster2 accepts a FOFN, so pooling does not need an intermediate BAM merge.
         ISOSEQ_REFINE.out.bam
           .map { meta, bam -> bam  }
           .collect()
-          .map { bams -> [ [ id: prefix ], bams ] }
+          .map { bams -> [ [ id: prefix, single_end: true ], bams ] }
           .set { ch_pooled_bams }
 
-        PBMERGE_MULTI_SAMPLE(ch_pooled_bams)
-        ISOSEQ_CLUSTER2_MULTI_SAMPLE(PBMERGE_MULTI_SAMPLE.out.bam)
+        ISOSEQ_CLUSTER2_MULTI_SAMPLE(ch_pooled_bams)
         BAM_TO_FA_MULTI_SAMPLE(ISOSEQ_CLUSTER2_MULTI_SAMPLE.out.bam)
 
         ch_pbccs_merged_flnc_clustered_fa = ch_pbccs_merged_flnc_clustered_fa.mix(BAM_TO_FA_MULTI_SAMPLE.out.singletons)
@@ -280,30 +256,6 @@ workflow ISOSEQ {
 
         ch_versions = ch_versions.mix(BAM_TO_FA_MULTI_SAMPLE.out.versions)
         ch_versions = ch_versions.mix(ISOSEQ_CLUSTER2_MULTI_SAMPLE.out.versions)
-        ch_versions = ch_versions.mix(PBMERGE_MULTI_SAMPLE.out.versions)
-      } else if (isoseq_cluster2_mode == "both") {
-        ISOSEQ_CLUSTER2(ISOSEQ_REFINE.out.bam)
-        BAM_TO_FA(ISOSEQ_CLUSTER2.out.bam)
-        ch_pbccs_merged_flnc_clustered_fa = ch_pbccs_merged_flnc_clustered_fa.mix(BAM_TO_FA.out.singletons)
-        ch_pbccs_merged_flnc_clustered_fa = ch_pbccs_merged_flnc_clustered_fa.mix(BAM_TO_FA.out.hq)
-
-        ISOSEQ_REFINE.out.bam
-          .map { meta, bam -> bam  }
-          .collect()
-          .map { bams -> [ [id: prefix, single_end:true], bams ] }
-          .set { ch_pooled_bams }
-
-        PBMERGE_MULTI_SAMPLE(ch_pooled_bams)
-        ISOSEQ_CLUSTER2_MULTI_SAMPLE(PBMERGE_MULTI_SAMPLE.out.bam)
-        BAM_TO_FA_MULTI_SAMPLE(ISOSEQ_CLUSTER2_MULTI_SAMPLE.out.bam)
-        ch_pbccs_merged_flnc_clustered_fa = ch_pbccs_merged_flnc_clustered_fa.mix(BAM_TO_FA_MULTI_SAMPLE.out.singletons)
-        ch_pbccs_merged_flnc_clustered_fa = ch_pbccs_merged_flnc_clustered_fa.mix(BAM_TO_FA_MULTI_SAMPLE.out.hq)
-
-        ch_versions = ch_versions.mix(ISOSEQ_CLUSTER2.out.versions)
-        ch_versions = ch_versions.mix(BAM_TO_FA_MULTI_SAMPLE.out.versions)
-        ch_versions = ch_versions.mix(BAM_TO_FA.out.versions)
-        ch_versions = ch_versions.mix(ISOSEQ_CLUSTER2_MULTI_SAMPLE.out.versions)
-        ch_versions = ch_versions.mix(PBMERGE_MULTI_SAMPLE.out.versions)
       }
 
       /*
@@ -313,7 +265,6 @@ workflow ISOSEQ {
       */
 
       ch_versions = ch_versions.mix(ISOSEQ_REFINE.out.versions)
-      ch_versions = ch_versions.mix(LIMA.out.versions)
 
     /*
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -27,8 +27,12 @@ def validateFullRun() {
     if (!params.global_annotation) { problems << 'missing required --global_annotation' }
     if (!params.global_repeats) { problems << 'missing required --global_repeats' }
     
-    if (!(params.entrypoint in ['subreads', 'ccs', 'flnc'])) { 
-      problems << 'ERROR: Unknown entrypoint option -> options are: subreads, ccs, flnc'
+    if (!(params.entrypoint in ['subreads', 'ccs', 'refine', 'flnc'])) {
+      problems << 'ERROR: Unknown entrypoint option -> options are: subreads, ccs, refine, flnc'
+    }
+
+    if (params.entrypoint in ['subreads', 'ccs', 'refine'] && !params.global_primers) {
+      problems << 'missing required --global_primers'
     }
 
     if (!(params.isoseq_cluster2_mode in ['per_sample', 'multi_sample', 'both'])) { 
