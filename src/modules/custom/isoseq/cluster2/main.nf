@@ -1,6 +1,6 @@
 process ISOSEQ_CLUSTER2 {
     tag "$meta.id"
-    label 'process_medium'
+    label 'process_extreme'
 
     conda "${moduleDir}/environment.yml"
     container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
