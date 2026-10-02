@@ -56,23 +56,39 @@ workflow POLISH {
       ch_versions            // [ meta, versions.yml ]
 
     main:
+      // INFO: reads -> [ meta, reads.bed, introns.tsv, orfs.tsv ], one item per sample@chromosome
+      // INFO: meta.id = '<sample>@<chr>', meta.name = '<sample>'
       ch_reference_transcripts = annotation
+
+      /*
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+          DESCRIPTORS [ RETENTION, INTRAPRIMING, TRUNCATION ]
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      */
 
       ISOTOOLS_INTRON_RETENTION(
         reads
-      )
+      ) // INFO: intron retention per read, uses the classified introns
 
       ISOTOOLS_PAS_CALLER(
         reads,
         ch_reference_transcripts,
         forward_peaks,
         reverse_peaks
-      )
+      ) // INFO: polyA sites vs. annotation + APARENT peaks -> intrapriming descriptor
 
       ISOTOOLS_TRUNCATION_DETECTOR(
         reads
-      )
+      ) // INFO: truncation descriptor (iso-utr, reads against themselves)
 
+      /*
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+          VEREDICT [ PASS, TRASH, RETENTIONS, TRUNCATIONS, INTRAPRIMING, RT ]
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      */
+
+      // INFO: join by meta -> [ meta, reads, introns, orfs, retentions, intrapriming, truncations ]
+      // INFO: VEREDICT reads the four descriptors (orfs + the three above); introns are ignored here
       reads
         .join(ISOTOOLS_INTRON_RETENTION.out.descriptor)
         .join(ISOTOOLS_PAS_CALLER.out.descriptor)
@@ -83,7 +99,19 @@ workflow POLISH {
         ch_polished_reads
       )
 
-      // INFO: collect all veredict results per category and join
+      /*
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+          PER-SAMPLE TRACKS [ JOIN -> DETACH -> BEDTOBIGBED ]
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      */
+
+      // INFO: VEREDICT runs per sample@chromosome; each class is regrouped by meta.name
+      // INFO: so JOIN concatenates + sorts all chromosomes into one BED per sample,
+      // INFO: DETACH splits '#DU'-tagged duplicates out and BEDTOBIGBED builds one track
+      // INFO: meta from here on -> [ id: '<sample>.<class>', name: '<sample>' ]
+
+      // INFO: pass -> detach -> orphan finder (hq / scraps) -> collapse -> bigBed
+      // INFO: duplicates and scraps get their own bigBed
       ISOTOOLS_PLUGIN_VEREDICT.out.pass
           .map { meta, pass -> [ meta.name, meta, pass ] }    
           .groupTuple()                                      
@@ -154,6 +182,13 @@ workflow POLISH {
       DETACH_RT_DUPLICATES(JOIN_VEREDICT_RT.out.output)
       BEDTOBIGBED_RT(DETACH_RT_DUPLICATES.out.pass, chrom_sizes, autosql)
 
+      /*
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+          PUBLISH BIGBEDS
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      */
+
+      // INFO: all bigBeds of one sample -> [ [ id: '<sample>' ], [ *.bb ] ] for 12_POLISH/BB
       ch_bbs = Channel.empty()
       ch_bbs = ch_bbs.mix(BEDTOBIGBED_PASSES.out.bigbed)
       ch_bbs = ch_bbs.mix(BEDTOBIGBED_DUPLICATES.out.bigbed)
@@ -178,6 +213,7 @@ workflow POLISH {
       retentions            = BEDTOBIGBED_RETENTIONS.out.bigbed
       truncations           = BEDTOBIGBED_TRUNCATIONS.out.bigbed
       intraprimming         = BEDTOBIGBED_INTRAPRIMMING.out.bigbed
+      rt                    = BEDTOBIGBED_RT.out.bigbed
       bigbeds               = ch_bbs
       additional_columns    = ISOTOOLS_PLUGIN_VEREDICT.out.additional_bed_columns
       sample                = ch_bbs.map { meta, file -> meta.id }

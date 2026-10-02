@@ -23,6 +23,10 @@ workflow LOAD_TRACK {
       ch_versions            // [ meta, versions.yml ]
 
     main:
+      // INFO: one call per bigBed class (pass, trash, fusions, nmd, ...), only with params.load_track
+      // INFO: per bigBed: rsync to <user>@<server>:<target_dir>/<species>/isopipe/<name>.bb,
+      // INFO: then symlink it into <web>/<species>/ on the server so the browser can serve it
+      // WARN: needs passwordless ssh to <server>; nothing is emitted except versions
       RSYNC_SSH(
         bigbed,
         user,

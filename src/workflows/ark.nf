@@ -24,6 +24,7 @@ include { LOAD_TRACK as LOAD_TRASH_TRACK } from '../subworkflows/track/main.nf'
 include { LOAD_TRACK as LOAD_RETENTIONS_TRACK } from '../subworkflows/track/main.nf'
 include { LOAD_TRACK as LOAD_TRUNCATIONS_TRACK } from '../subworkflows/track/main.nf'
 include { LOAD_TRACK as LOAD_INTRAPRIMMING_TRACK } from '../subworkflows/track/main.nf'
+include { LOAD_TRACK as LOAD_RT_TRACK } from '../subworkflows/track/main.nf'
 include { LOAD_TRACK as LOAD_FUSIONS_TRACK } from '../subworkflows/track/main.nf'
 include { LOAD_TRACK as LOAD_NMD_TRACK } from '../subworkflows/track/main.nf'
 
@@ -37,9 +38,11 @@ include { ISOTOOLS_NMD as ISOTOOLS_NMD_FILTER } from '../modules/custom/isotools
 
 include { GAWK_JOIN as JOIN_FUSIONS } from '../modules/custom/gawk/join/main.nf'
 include { GAWK_JOIN as JOIN_NMD } from '../modules/custom/gawk/join/main.nf'
+include { GAWK_JOIN as JOIN_INTRONS } from '../modules/custom/gawk/join/main.nf'
 
 include { BEDTOBIGBED as BEDTOBIGBED_FUSIONS } from '../modules/custom/bigtools/bedtobigbed/main.nf'
 include { BEDTOBIGBED as BEDTOBIGBED_NMD } from '../modules/custom/bigtools/bedtobigbed/main.nf'
+include { BEDTOBIGBED as BEDTOBIGBED_INTRONS } from '../modules/custom/bigtools/bedtobigbed/main.nf'
 
 include { PUBLISH as PUBLISH_ADDITIONAL_BIGBEDS } from '../modules/custom/publish/main.nf'
 include { TRACKDB } from '../modules/custom/track/main.nf'
@@ -64,12 +67,12 @@ workflow ARK {
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: .as schemas for the bigBed tracks (base: fusion/NMD tracks, schema: polish tracks)
       AUTOSQL_BASE()
       AUTOSQL_SCHEMA()
 
       autosql = AUTOSQL_BASE.out.autosql
       schema = AUTOSQL_SCHEMA.out.autosql
-      track = Channel.value(file('${projectDir}/../../assets/as/track.as'))
 
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -77,6 +80,7 @@ workflow ARK {
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: genome, indexes, splice scores, annotation and reads [ meta, fasta ] (one per sample and hq/singleton class)
       PREPROCESSING(
         params.entrypoint,
         params.global_input_dir,
@@ -110,17 +114,16 @@ workflow ARK {
           ALIGNMENT [ SPLIT_ALIGN_CLEAN_CHUNKS ]
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
-      
+
+      // INFO: chunk, align, segment and detect fusions; both outputs are per sample and chromosome
+      // INFO: [ [ id: sample_id, single_end: true, chr ], bed ]
       if (params.aligner in ['mm2', 'ultra', 'pbmm2', 'desalt', 'ark', 'flair']) {
         SPLIT_ALIGN_CLEAN_CHUNKS(
           PREPROCESSING.out.reads,
           PREPROCESSING.out.genome,
           PREPROCESSING.out.genome_index,
           PREPROCESSING.out.reference_transcripts,
-          params.global_prefix,
           PREPROCESSING.out.splice_scores,
-          params.isoseq_cluster2_mode,
-          params.entrypoint,
           params.aligner,
           params.minimap2_align_use_junc_bed,
           params.isotools_adapter_remove_adapters,
@@ -146,6 +149,7 @@ workflow ARK {
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: RNAsamba weights for xORF, local file if given, otherwise downloaded
       ch_samba_weights = Channel.empty()
       if (params.xorf_samba_local_weights) {
         ch_samba_weights = Channel.value(
@@ -190,6 +194,8 @@ workflow ARK {
           .map { meta, bed, tsv -> [ meta, bed ] }
           .set { ch_orf_predictions_bed }
 
+      // INFO: same ORF calling on fusion reads; per-chromosome beds are joined into one
+      // INFO: <name>.fusions.bed + bigBed per sample
       XORF_PREDICT_FUSION_ORFS(
           ch_fusions,
           PREPROCESSING.out.genome,
@@ -224,6 +230,8 @@ workflow ARK {
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: per sample@chromosome: reads (feed pre-polishing) and NMD candidates
+      // INFO: (joined into one <name>.nmd.bed + bigBed per sample)
       ISOTOOLS_NMD_FILTER(ch_orf_predictions_bed)
 
       ISOTOOLS_NMD_FILTER.out.nmd
@@ -238,25 +246,11 @@ workflow ARK {
 
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-          ADDITIONAL BIGBEDS [ BEDTOBIGBED_FUSIONS, BEDTOBIGBED_NMD ]
-      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-      */
-
-      ch_additional_bbs = Channel.empty()
-      ch_additional_bbs = ch_additional_bbs.mix(BEDTOBIGBED_FUSIONS.out.bigbed)
-      ch_additional_bbs = ch_additional_bbs.mix(BEDTOBIGBED_NMD.out.bigbed)
-      ch_additional_bbs.map { meta, file -> [meta.name, meta, file] }
-         .groupTuple()
-         .map { name, metas, files -> [ [ id: name ], files] }
-         .set { ch_additional_bbs }
-      PUBLISH_ADDITIONAL_BIGBEDS(ch_additional_bbs)
-
-      /*
-      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
           APARENT WEIGHTS [ POLYA PEAKS ]
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: APARENT model weights, local file if given, otherwise downloaded
       ch_aparent_weights = Channel.empty()
       if (params.aparent_predict_weights_local_path) {
           ch_aparent_weights = Channel.value(
@@ -277,6 +271,7 @@ workflow ARK {
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: per sample@chromosome: intron classification (tsv + BED4 track) and polyA peaks (bigWig per strand)
       ISOTOOLS_PREPOLISH(
           ISOTOOLS_NMD_FILTER.out.reads,
           PREPROCESSING.out.genome,
@@ -288,6 +283,7 @@ workflow ARK {
           ch_versions
       )
 
+      // INFO: polish input per sample@chromosome, joined on meta.id: [ meta, reads, intron tsv, ORF tsv ]
       ISOTOOLS_NMD_FILTER.out.reads
         .map { meta, read -> tuple(meta.id, meta, read) }
         .join(
@@ -306,12 +302,43 @@ workflow ARK {
         }
         .set { ch_full_length_reads }
 
+      // INFO: artifact / unclear / RT introns, joined into one <name>.introns.bed + bigBed per sample.
+      // INFO: BED4, so no autosql
+      ISOTOOLS_PREPOLISH.out.intron_track
+          .map { meta, bed -> [ meta.name, meta, bed ] }
+          .groupTuple()
+          .map { name, metas, files ->
+              [ [ id: name + '.introns', name: name ], files ]
+          }
+          .set { ch_intron_bed }
+      JOIN_INTRONS(ch_intron_bed, 'bed')
+      BEDTOBIGBED_INTRONS(JOIN_INTRONS.out.output, PREPROCESSING.out.chrom_sizes, [])
+
+      /*
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+          ADDITIONAL BIGBEDS [ BEDTOBIGBED_FUSIONS, BEDTOBIGBED_NMD, BEDTOBIGBED_INTRONS ]
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      */
+
+      // INFO: fusion, NMD and intron bigBeds grouped per sample and published to 12_POLISH/BB
+      ch_additional_bbs = Channel.empty()
+      ch_additional_bbs = ch_additional_bbs.mix(BEDTOBIGBED_FUSIONS.out.bigbed)
+      ch_additional_bbs = ch_additional_bbs.mix(BEDTOBIGBED_NMD.out.bigbed)
+      ch_additional_bbs = ch_additional_bbs.mix(BEDTOBIGBED_INTRONS.out.bigbed)
+      ch_additional_bbs.map { meta, file -> [meta.name, meta, file] }
+         .groupTuple()
+         .map { name, metas, files -> [ [ id: name ], files] }
+         .set { ch_additional_bbs }
+      PUBLISH_ADDITIONAL_BIGBEDS(ch_additional_bbs)
+
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
           POLISHING [ ISOTOOLS_POLISH ]
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: sorts reads into pass / duplicates / scraps / trash / retentions / truncations / intrapriming,
+      // INFO: published per sample as BED (12_POLISH/BED) and bigBed (12_POLISH/BB)
       ISOTOOLS_POLISH(
           ch_full_length_reads,
           PREPROCESSING.out.reference_transcripts,
@@ -329,9 +356,9 @@ workflow ARK {
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: optional: writes trackDb and copies the bigBeds to the genome browser server
       if (params.load_track) {
           TRACKDB(
-            track,
             params.load_track_browser,
             params.global_species_name,
             params.load_track_name,
@@ -360,7 +387,7 @@ workflow ARK {
           )
 
           LOAD_ORPHANS_TRACK(
-            ISOTOOLS_POLISH.out.orphans,
+            ISOTOOLS_POLISH.out.scraps, // INFO: reads the orphan finder set aside
             params.load_track_user,
             params.load_track_server,
             params.load_track_target_dir,
@@ -409,6 +436,16 @@ workflow ARK {
             ch_versions
           )
 
+          LOAD_RT_TRACK(
+            ISOTOOLS_POLISH.out.rt, // INFO: trackDb lists an rt subtrack; without this its file was never uploaded
+            params.load_track_user,
+            params.load_track_server,
+            params.load_track_target_dir,
+            params.load_track_web,
+            params.global_species_name,
+            ch_versions
+          )
+
           LOAD_FUSIONS_TRACK(
             BEDTOBIGBED_FUSIONS.out.bigbed,
             params.load_track_user,
@@ -420,7 +457,7 @@ workflow ARK {
           )
 
           LOAD_NMD_TRACK(
-            ISOTOOLS_NMD_FILTER.out.nmd,
+            BEDTOBIGBED_NMD.out.bigbed, // INFO: the per-sample bigBed, not the per-chromosome BEDs
             params.load_track_user,
             params.load_track_server,
             params.load_track_target_dir,
@@ -442,8 +479,10 @@ workflow ARK {
       ch_versions = ch_versions.mix(ISOTOOLS_NMD_FILTER.out.versions)
       ch_versions = ch_versions.mix(JOIN_FUSIONS.out.versions)
       ch_versions = ch_versions.mix(JOIN_NMD.out.versions)
+      ch_versions = ch_versions.mix(JOIN_INTRONS.out.versions)
       ch_versions = ch_versions.mix(BEDTOBIGBED_FUSIONS.out.versions)
       ch_versions = ch_versions.mix(BEDTOBIGBED_NMD.out.versions)
+      ch_versions = ch_versions.mix(BEDTOBIGBED_INTRONS.out.versions)
 }
 
 /*

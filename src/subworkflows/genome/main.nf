@@ -19,12 +19,15 @@ workflow GENOME {
       genome  // file: /path/to/genome.{2bit/fasta}
 
     main:
+      // INFO: accepts .2bit, .gz (gzipped FASTA) or plain FASTA
+      // INFO: genome and chrom_sizes are value channels (bare path, no meta), reusable by any number of tasks
       ch_versions = Channel.empty()
       ch_fasta = Channel.empty()
 
       def genome_file = file(genome, checkIfExists: true)
       def genome_path = genome_file.toString()
 
+      // INFO: chromsize reads the input file as given (before any conversion)
       ch_chrom_sizes = CHROMSIZE([[:], genome_file]).chromsize.map { it[1] }
 
       // INFO: if fasta is .2bit or .gz, convert or uncompress it
