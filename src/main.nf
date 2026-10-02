@@ -27,8 +27,8 @@ def validateFullRun() {
     if (!params.global_annotation) { problems << 'missing required --global_annotation' }
     if (!params.global_repeats) { problems << 'missing required --global_repeats' }
     
-    if (!(params.entrypoint in ['subreads', 'ccs', 'refine', 'flnc'])) {
-      problems << 'ERROR: Unknown entrypoint option -> options are: subreads, ccs, refine, flnc'
+    if (!(params.entrypoint in ['subreads', 'ccs', 'refine', 'cluster', 'flnc'])) {
+      problems << 'ERROR: Unknown entrypoint option -> options are: subreads, ccs, refine, cluster, flnc'
     }
 
     if (params.entrypoint in ['subreads', 'ccs', 'refine'] && !params.global_primers) {
@@ -40,7 +40,7 @@ def validateFullRun() {
     }
 
     if (!(params.aligner in ['mm2', 'ultra', 'desalt', 'pbmm2', 'flair', 'ark'])) { 
-      problems << 'ERROR: Unknown aligner option -> options are: mm2, ultra, desalt, pbmm2, flair'
+      problems << 'ERROR: Unknown aligner option -> options are: mm2, ultra, desalt, pbmm2, flair, ark'
     }
 
     if (problems) {
