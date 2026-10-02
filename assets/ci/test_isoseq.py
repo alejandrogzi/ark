@@ -62,10 +62,19 @@ elif name == 'samtools':
             if not line.startswith('@'):
                 print('>' + line.split('\t')[0] + '\nACGT')
 elif name == 'fxsplit':
+    # Real chunk names carry the --suffix (meta.id), so every chunk FASTA has a distinct staged name.
     Path('chunks').mkdir()
-    shutil.copyfile(option('-f'), 'chunks/0.fasta.gz')
+    shutil.copyfile(option('-f'), f"chunks/tmp_chunk_0_{option('--suffix')}.fasta.gz")
 elif name == 'minimap2':
     Path(option('-o')).write_text(sam)
+elif name == 'iso-cigar':
+    stem = option('--bam').removesuffix('.bam')
+    Path(stem + '.extended.bam').touch()
+    Path(stem + '.extended.bam.bai').touch()
+elif name == 'iso-align':
+    assert all(Path(path).is_file() for path in [option('--bam')] + option('--reads').split(',')), args
+    Path(option('--report')).touch()
+    Path(option('--output')).touch()  # empty: the module deletes it, so no fragment re-alignment
 elif name == 'iso-segment':
     Path('chr1@' + option('--prefix') + '.hq.bed').write_text('chr1\t0\t4\tr1\n')
 elif name == 'iso-fusion':
@@ -85,10 +94,14 @@ with tempfile.TemporaryDirectory(prefix="ark-isoseq-") as temporary:
     temporary = Path(temporary)
     binary = temporary / "bin"
     binary.mkdir()
-    for name in ("pbindex", "lima", "isoseq", "samtools", "fxsplit", "minimap2", "iso-segment", "iso-fusion"):
+    for name in ("pbindex", "lima", "isoseq", "samtools", "fxsplit", "minimap2", "iso-cigar", "iso-align",
+                 "iso-segment", "iso-fusion"):
         executable = binary / name
         executable.write_text(TOOLS)
         executable.chmod(0o755)
+    # Cigar extension stages genome and annotation side by side, so they need distinct names.
+    for name in ("genome.fa", "genome.mmi", "annotation.bed"):
+        (temporary / name).touch()
 
     config = temporary / "test.config"
     config.write_text("""
@@ -105,19 +118,29 @@ apptainer.enabled = false
 singularity.enabled = false
 conda.enabled = false
 params.aligner = 'mm2'
+params.cigar = false
 """)
+    # The second pass runs only for the ark cases (--aligner ark); --cigar toggles cigar extension there.
     harness = temporary / "main.nf"
     harness.write_text("""
 include { ISOSEQ } from 'REPO/src/subworkflows/isoseq/main.nf'
 include { SPLIT_ALIGN_CLEAN_CHUNKS } from 'REPO/src/subworkflows/split_align/main.nf'
 workflow {
-    ISOSEQ(params.global_input_dir, params.global_primers, 1, params.isoseq_cluster2_mode,
-        'pooled', params.entrypoint, params.entrypoint == 'refine')
-    SPLIT_ALIGN_CLEAN_CHUNKS(ISOSEQ.out.reads, Channel.value(file(params.global_primers)),
-        Channel.value([[:], file(params.global_primers)]),
-        Channel.value([[:], file(params.global_primers)]), 'pooled', Channel.value([[:], []]),
-        params.isoseq_cluster2_mode, params.entrypoint, 'mm2', false,
-        false, false, false, false, Channel.empty())
+    if (params.entrypoint == 'flnc') {
+        // Same read channel as src/subworkflows/preprocessing/main.nf builds for flnc.
+        reads = Channel.fromPath("${params.global_input_dir}/*.fast*", checkIfExists: true).map { fastx ->
+            [[id: fastx.baseName, sample_id: fastx.name.replaceFirst(/(?:\\.(?:hq|singletons))?\\.fast[aq](?:\\.gz)?$/, ''),
+              single_end: true, singleton: fastx.baseName.contains('singleton')], fastx]
+        }
+    } else {
+        ISOSEQ(params.global_input_dir, params.global_primers, 1, params.isoseq_cluster2_mode,
+            'pooled', params.entrypoint, params.entrypoint in ['refine', 'cluster'])
+        reads = ISOSEQ.out.reads
+    }
+    SPLIT_ALIGN_CLEAN_CHUNKS(reads, Channel.value(file("${projectDir}/genome.fa")),
+        Channel.value([[:], file("${projectDir}/genome.mmi")]), Channel.value([[:], file("${projectDir}/annotation.bed")]),
+        Channel.value([[:], []]), params.aligner, false, false, false, params.cigar, params.aligner == 'ark',
+        Channel.empty())
     SPLIT_ALIGN_CLEAN_CHUNKS.out.reads.view { meta, bed -> 'RESULT\\t' + meta.id }
 }
 """.replace("REPO", str(ROOT)))
@@ -126,18 +149,26 @@ workflow {
 
     isoseqx = [f"IsoSeqX_bc{i:02}_5p--IsoSeqX_3p" for i in (1, 2)]
     neb = ["NEB_5p--NEB_Clontech_3p", "NEB_5p--primer_3p"]
-    for entrypoint, mode, pairs in (("refine", "per_sample", isoseqx), ("refine", "multi_sample", isoseqx),
-                                    ("refine", "both", isoseqx), ("refine", "per_sample", isoseqx[:1]),
-                                    ("ccs", "per_sample", isoseqx[:1]), ("ccs", "both", isoseqx),
-                                    ("refine", "both", neb), ("ccs", "both", neb)):
-        case = temporary / f"{entrypoint}-{mode}-{pairs[0]}-{len(pairs)}"
+    # cigar None: mm2, second pass off. True/False: ark, second pass on, cigar extension on/off.
+    # flnc ignores the cluster mode; "per_sample" only makes `expected` below the per-sample ids.
+    for entrypoint, mode, pairs, cigar in (
+            ("refine", "per_sample", isoseqx, None), ("refine", "multi_sample", isoseqx, None),
+            ("refine", "both", isoseqx, None), ("refine", "per_sample", isoseqx[:1], None),
+            ("ccs", "per_sample", isoseqx[:1], None), ("ccs", "both", isoseqx, None),
+            ("refine", "both", neb, None), ("ccs", "both", neb, None), ("cluster", "both", isoseqx, None),
+            ("refine", "multi_sample", isoseqx, True), ("refine", "per_sample", isoseqx, True),
+            ("flnc", "per_sample", isoseqx, True), ("flnc", "per_sample", isoseqx, False)):
+        case = temporary / f"{entrypoint}-{mode}-{pairs[0]}-{len(pairs)}-{cigar}"
         inputs = case / "02_LIMA"
         inputs.mkdir(parents=True)
-        stems = [f"movie.part.hifi_fl.{pair}" for pair in pairs]
-        for i, stem in enumerate(stems if entrypoint == "refine" else ["movie.part.hifi"]):
-            (inputs / f"{stem}.bam").touch()
-            if i == 0:
-                (inputs / f"{stem}.bam.pbi").touch()
+        samples = {f"movie.part.hifi.{pair}" for pair in pairs}
+        files = {"refine": [f"movie.part.hifi_fl.{pair}.bam" for pair in pairs], "ccs": ["movie.part.hifi.bam"],
+                 "cluster": [f"movie.part.hifi.{pair}_flnc.bam" for pair in pairs],
+                 "flnc": [f"{sample}.{kind}.fasta.gz" for sample in samples for kind in ("hq", "singletons")]}
+        for i, name in enumerate(files[entrypoint]):
+            (inputs / name).touch()
+            if i == 0 and entrypoint != "flnc":
+                (inputs / f"{name}.pbi").touch()
         (inputs / "ignored.consensusreadset.xml").touch()
         (inputs / "ignored.lima.report").touch()
         primers = case / "primers.fasta"
@@ -145,45 +176,61 @@ workflow {
         primers.write_text("".join(f">{name}\nACGT\n" for name in names))
         calls = case / "calls.jsonl"
         environment.update(TEST_PRIMER_PAIRS=json.dumps(pairs), TEST_CALLS=str(calls))
-        command = base + [str(harness), "--global_input_dir", str(inputs), "--global_primers", str(primers),
+        command = base + [str(harness), "--global_input_dir", str(inputs),
                           "--global_output_dir", str(case / "results"), "--isoseq_cluster2_mode", mode,
                           "--entrypoint", entrypoint]
+        command += ["--global_primers", str(primers)] if entrypoint != "cluster" else []  # cluster needs none
+        command += ["--aligner", "ark", "--cigar", str(cigar).lower()] if cigar is not None else []
         result = subprocess.run(command, cwd=case, env=environment, text=True, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=120)
         assert result.returncode == 0, result.stdout
         actual = {line.split("\t")[1] for line in result.stdout.splitlines() if line.startswith("RESULT\t")}
-        samples = {f"movie.part.hifi.{pair}" for pair in pairs}
         expected = (samples if mode != "multi_sample" else set()) | ({"pooled"} if mode != "per_sample" else set())
         assert actual == expected, (actual, expected, result.stdout)
         records = [json.loads(line) for line in calls.read_text().splitlines()]
         refine = [args for name, args in records if name == "isoseq" and args[0] == "refine"]
         cluster = [args for name, args in records if name == "isoseq" and args[0] == "cluster2"]
-        assert len(refine) == len(pairs), refine
-        assert len(cluster) == len(expected), cluster
+        assert len(refine) == (len(pairs) if entrypoint in ("refine", "ccs") else 0), refine
+        assert len(cluster) == (len(expected) if entrypoint != "flnc" else 0), cluster
         assert sum(name == "lima" for name, _ in records) == (entrypoint == "ccs")
-        assert sum(name == "pbindex" for name, _ in records) == (entrypoint == "refine" and len(pairs) > 1)
-        print(f"PASS {entrypoint}: {mode}, {', '.join(pairs)}", flush=True)
+        assert sum(name == "pbindex" for name, _ in records) == (entrypoint in ("refine", "cluster") and len(pairs) > 1)
+        assert not any(name == "samtools" and args[0] == "merge" for name, args in records), records
+        # Every result id has one hq and one singleton chunk. With the second pass on, iso-align runs once per
+        # chunk BAM with exactly the chunk FASTA minimap2 aligned it from (reads name -> SAM name).
+        chunks = {args[-3]: args[-1].removesuffix(".sam") for name, args in records if name == "minimap2"}
+        found = sorted((args[args.index("--bam") + 1], args[args.index("--reads") + 1])
+                       for name, args in records if name == "iso-align")
+        suffix = ".extended.bam" if cigar else ".bam"
+        assert len(chunks) == 2 * len(expected), chunks
+        assert found == (sorted((sam + suffix, reads) for reads, sam in chunks.items()) if cigar is not None else []), (found, chunks)
+        second_pass = "" if cigar is None else f", ark second pass, cigar extension {'on' if cigar else 'off'}"
+        print(f"PASS {entrypoint}: {mode}, {', '.join(pairs)}{second_pass}", flush=True)
 
-    # A checkpoint without a primer-pair suffix must fail before refinement.
-    case = temporary / "invalid-lima-name"
-    case.mkdir()
-    (case / "movie.part.hifi_fl.NEB_5p.bam").touch()
-    (case / "movie.part.hifi_fl.NEB_5p.bam.pbi").touch()
-    calls = case / "calls.jsonl"
-    environment.update(TEST_CALLS=str(calls))
-    result = subprocess.run(base + [str(harness), "--entrypoint", "refine", "--global_input_dir", str(case),
-                                   "--global_primers", str(primers)],
-                            cwd=case, env=environment, text=True, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, timeout=120)
-    assert result.returncode != 0 and "Unexpected LIMA BAM name: movie.part.hifi_fl.NEB_5p.bam" in result.stdout, result.stdout
-    assert not calls.exists(), calls.read_text()
-    print("PASS malformed LIMA filename rejected before refinement", flush=True)
+    # A checkpoint without a primer-pair (refine) or _flnc (cluster) suffix must fail before any tool runs.
+    for start, bam, diagnostic in (("refine", "movie.part.hifi_fl.NEB_5p.bam", "Unexpected LIMA BAM name"),
+                                   ("cluster", "movie.part.hifi.NEB_5p--NEB_Clontech_3p.bam",
+                                    "Unexpected refined BAM name")):
+        case = temporary / f"invalid-{start}-name"
+        case.mkdir()
+        (case / bam).touch()
+        (case / f"{bam}.pbi").touch()
+        calls = case / "calls.jsonl"
+        environment.update(TEST_CALLS=str(calls))
+        result = subprocess.run(base + [str(harness), "--entrypoint", start, "--global_input_dir", str(case),
+                                       "--global_primers", str(primers), "--global_output_dir", str(case / "results")],
+                                cwd=case, env=environment, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=120)
+        assert result.returncode != 0 and f"{diagnostic}: {bam}" in result.stdout, result.stdout
+        assert not calls.exists(), calls.read_text()
+    print("PASS malformed LIMA and refined filenames rejected before any tool runs", flush=True)
 
-    # Exercise the actual CLI validator for the refine checkpoint and invalid entrypoints.
+    # Exercise the actual CLI validator: refine needs primers, cluster does not, unknown entrypoints fail.
     for start, diagnostic in (("refine", "missing required --global_primers"),
+                              ("cluster", "Parameter validation failed"),
                               ("unknown", "Unknown entrypoint option")):
         result = subprocess.run(base + [str(ROOT / "src/main.nf"), "--entrypoint", start],
                                 cwd=temporary, env=environment, text=True, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=120)
         assert result.returncode != 0 and diagnostic in result.stdout, result.stdout
+        assert ("missing required --global_primers" in result.stdout) == (start == "refine"), result.stdout
     print("PASS --entrypoint validation and missing primers", flush=True)
