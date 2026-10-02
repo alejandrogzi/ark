@@ -36,8 +36,7 @@ process SAMTOOLS_BAM {
 
     samtools \\
     index \\
-    -@ \\
-    {task.cpus} \\
+    -@ ${task.cpus} \\
     $bam
 
     if [ $keep_temp == false ]; then
