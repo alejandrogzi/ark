@@ -57,7 +57,34 @@
 
 ## [v2.0.27] - 2026-10-02
 
-This release fixes a dead second pass (fragment detection never ran for any current entrypoint), adds a `cluster` checkpoint that restarts from refined reads, and wires the iso-classify intron track end to end. The trackDb template is now generated inline instead of read from disk, the genome-browser upload wiring is corrected, and resume after alignment works again. A batch of smaller correctness fixes (thread flag, collapse prefix, splicing channel shapes, aligner plumbing) is included, along with an extended stub harness and a CI trigger correction. CI gold has to be regenerated (see below).
+This release rolls up everything since v2.0.26 (PRs #43-#47 plus direct fixes) alongside new work on this branch: it fixes a dead second pass (fragment detection never ran for any current entrypoint), adds `refine` and `cluster` restart checkpoints, wires the iso-classify intron track end to end, and implements xORF database merging through `custom_database`. The trackDb template is now generated inline instead of read from disk, the genome-browser upload wiring is corrected, resume after alignment works again, and a full end-to-end CI suite guards the pipeline. CI gold has to be regenerated (see below).
+
+### New checkpoint: `--entrypoint refine` (PR #47)
+
+- Runs restart from LIMA output (`02_LIMA`) with `--entrypoint refine`: every `*.<5p>--<3p>.bam` is loaded with its `.pbi` (missing indexes rebuilt via `PBINDEX`), and CCS, Skera, and LIMA are skipped, including for Kinnex libraries.
+- Sample identities keep the full primer pair end to end (`movie.IsoSeqX_bc01_5p--IsoSeqX_3p`, `movie.NEB_5p--NEB_Clontech_3p`): the complete `<5p>--<3p>` suffix is parsed without assuming IsoSeqX names, a BAM missing the suffix fails before refinement, and a stable `sample_id` survives alignment into per-chromosome grouping (dots and suffixes preserved). `flnc` FASTA sample ids are normalized so `.hq` + `.singletons` files of one sample group together.
+- Clustering reuses the same refined reads for `per_sample` / `multi_sample` / `both`; pooling goes through cluster2's native FOFN input, so the intermediate pooled-BAM merge and its unused imports are gone. `cluster2` handles a single BAM path as well as a list.
+- Added the `refine` value to entrypoint validation, preprocessing routing, config comments, and `params.json`, plus README documentation (checkpoint, BAM naming, clustering modes, barcode assignments) and a standalone `test_isoseq.py` Nextflow regression harness (eight scenarios + negative checks) run in CI.
+
+### BREAKING CHANGE: xORF database merging through `custom_database` (PR #46)
+
+- `xorf_custom_database` now accepts staged FASTA (`.fa` / `.fasta`, optionally `.gz`), which is merged with the default SwissProt sequences and reindexed: new `FASTA_MERGE` + `DIAMOND_MAKEDB` modules, new `xorf_raw_database` parameter (default UniProt SwissProt FASTA), and a reworked preprocessing branch (`.dmnd` / `.dmnd.gz` replace the default database outright; anything else errors with the accepted formats). `xorf` submodule bumped accordingly.
+- `workflows/ark.nf` passes the new `xorf_raw_database` through, along with the xORF v0.0.41 inputs (`run_only`, `database_versions`).
+
+### End-to-end CI test suite (PR #45)
+
+- Added a containerised e2e suite: `params.subreads.json` / `params.flnc.json` fixtures, `chr19` fixtures and `flnc` + `subreads` golden trees, and `compare.py` (line-count comparison since `R`-number ids are order-dependent, diffs shown in CI, PBCCS QC noise and `.sam` files ignored). Follow-ups minimized storage (dropped weights, gzipped chr), bumped the Nextflow version, and corrected fixture paths.
+
+### Tool-flag compatibility and resource fixes
+
+- BREAKING: `iso-classify` v0.0.13 renamed `--isoseq` / `--toga` to `--input` / `--reference` (old flags removed in isotools v0.0.42); the intron module passes the new flags, so the container must be rebuilt from isotools >= v0.0.42.
+- `bed2gtf` v2 renamed `-i` / `--input` to `-b` / `--input` (`-i` is now `--isoforms`): the module passes `-b`, fixing `invalid isoforms row` failures on 12-column BED input.
+- Skera/Kinnex: MAS adapter primer link updated to the Kinnex-full-length-RNA path; `PBSKERA_SPLIT` moved to the new `process_extreme` label (16 CPUs, 32 GB, 72 h) and the never-produced `non_passing.pbi` output was dropped.
+- `ISOSEQ_CLUSTER2` moved to `process_extreme`; `ISOTOOLS_TRUNCATION_DETECTOR` gains `-O cds`.
+
+### Docs and assets (PRs #43-#44)
+
+- Updated Hiller Lab logo, then theme-dependent dark/light logos plus the illustrated changelog header.
 
 ### Fragment detection fix and post-alignment merge removal
 
@@ -101,7 +128,7 @@ This release fixes a dead second pass (fragment detection never ran for any curr
 ### Chores
 
 - Bumped the pipeline version to 2.0.27 in the Nextflow manifest.
-- Documented the new `cluster` value in the `entrypoint` comments/validation (`subreads, ccs, refine, cluster, flnc`) and the full aligner set (`ark, mm2, ultra, desalt, pbmm2, flair`).
+- Entry checkpoints are now `subreads, ccs, refine, cluster, flnc` in validation, config comments, and `params.json` (`refine` via PR #47, `cluster` on this branch); the full aligner set (`ark, mm2, ultra, desalt, pbmm2, flair`) is listed in the unknown-aligner errors.
 - Added `INFO`/`WARN` channel-shape comments across `genome`, `spliceai`, `splicing`, `prepolish`, `polish`, `split_align`, `track`, and `workflows/ark.nf` with no logic change.
 - Gold has to be regenerated from a real containerised run: new `06_ARK_ALIGN/FRAGMENTS/*.report.tsv` (plus fragment outputs where reads qualify), `11_PREPOLISH/CLASSIFY/*.introns_track.bed`, `12_POLISH/BED/*.introns.bed`, possible downstream line-count shifts from fragment realignment, and the `*.pass.null.collapsed.bed` -> `*.pass.collapsed.bed` rename. The `subreads` gold already predates the primer-pair sample ids. CI will be red until gold is regenerated.
 
