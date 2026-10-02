@@ -36,7 +36,7 @@ include { DIAMOND_MAKEDB } from '../../modules/custom/diamond/makedb/main.nf'
 
 workflow PREPROCESSING {
     take:
-      entrypoint             // [ subreads, ccs, refine, flnc ]
+      entrypoint             // [ subreads, ccs, refine, cluster, flnc ]
       global_input_dir       // path
       global_primers         // path
       genome                 // path
@@ -54,7 +54,7 @@ workflow PREPROCESSING {
       spliceai               // path
       compression            // bool
       global_prefix          // string
-      aligner                // string [ minimap2, ultra ]
+      aligner                // string [ ark, mm2, ultra, desalt, pbmm2, flair ]
       ultra_use_annotation   // bool
       ultra_index            // path
       desalt_index           // path
@@ -113,7 +113,7 @@ workflow PREPROCESSING {
           DIAMOND_MAKEDB.out.db
             .map { meta, it -> it }
             .set { ch_database }
-          ch_versions = FASTA_MERGE.out.versions.mix(DIAMOND_MAKEDB.out.versions)
+          ch_versions = ch_versions.mix(FASTA_MERGE.out.versions).mix(DIAMOND_MAKEDB.out.versions)
       } else {
           error """
           ERROR: custom_database extension not recognized.
@@ -169,7 +169,7 @@ workflow PREPROCESSING {
 
       ch_genome_index = Channel.empty()
 
-      switch (params.aligner) {
+      switch (aligner) {
         case 'ark':
           if (minimap2_index) {
               ch_genome_index = Channel.value(file(minimap2_index, checkIfExists: true))
@@ -261,7 +261,7 @@ workflow PREPROCESSING {
 
         default:
           error """
-          ERROR: Unknown aligner: '${params.aligner}'.
+          ERROR: Unknown aligner: '${aligner}'.
           Valid aligners are: ark, mm2, ultra, desalt, pbmm2, flair
           """.stripIndent()
           System.exit(1)
@@ -311,13 +311,14 @@ workflow PREPROCESSING {
 
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-          ENTRYPOINTS [ subreads, ccs, refine, flnc ]
+          ENTRYPOINTS [ subreads, ccs, refine, cluster, flnc ]
      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
-      // INFO: isoseq entrypoint
+      // INFO: every entrypoint ends here with ch_reads = [ meta, reads FASTA/FASTQ ] for SPLIT_ALIGN
+      // INFO: Iso-Seq entrypoints: BAMs -> ISOSEQ (CCS/LIMA/refine/cluster2 from the stage the entrypoint names)
       ch_reads = Channel.empty()
-      if (entrypoint in ['subreads', 'ccs', 'refine']) {
+      if (entrypoint in ['subreads', 'ccs', 'refine', 'cluster']) {
           ISOSEQ(
               global_input_dir,
               global_primers,
@@ -331,6 +332,9 @@ workflow PREPROCESSING {
           ch_reads = ch_reads.mix(ISOSEQ.out.reads)
           ch_versions = ch_versions.mix(ISOSEQ.out.versions)
       } else if (entrypoint == "flnc") {
+          // INFO: flnc: FASTA/FASTQ files from global_input_dir, no Iso-Seq steps. meta.id = file baseName;
+          // INFO: sample_id = name minus .hq/.singletons and .fast[aq](.gz), so X.hq + X.singletons are one sample X
+          // INFO: singleton = name contains "singleton"
           Channel
               .fromPath("${global_input_dir}/*.fast*", checkIfExists: true)
               .map { fastx ->

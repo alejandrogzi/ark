@@ -14,7 +14,8 @@ process MINIMAP2_ALIGN {
     tuple val(meta3), path(junc_bed)
 
     output:
-    tuple val(meta), path("*.sam")                       , optional: true, emit: sam
+    // WARN: not optional. SAMTOOLS_BAM deletes the SAM; on -resume a missing required output reruns this task instead of silently emitting nothing
+    tuple val(meta), path("*.sam")                       , emit: sam
     path "versions.yml"                                  , emit: versions
 
     when:

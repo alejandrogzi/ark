@@ -22,14 +22,6 @@ include { SAMTOOLS_BAM as SAMTOOLS_BAM_ARK_ALIGN } from '../../modules/custom/sa
 include { SAMTOOLS_BAM as SAMTOOLS_BAM_FLAIR_ALIGN } from '../../modules/custom/samtools/bam/main.nf'
 include { SAMTOOLS_BAM as SAMTOOLS_BAM_FRAGMENTS } from '../../modules/custom/samtools/bam/main.nf'
 
-include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_BAM_MULTI_SAMPLE } from '../../modules/custom/samtools/merge/main.nf'
-include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ARK } from '../../modules/custom/samtools/merge/main.nf'
-include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_MINIMAP2 } from '../../modules/custom/samtools/merge/main.nf'
-include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ULTRA } from '../../modules/custom/samtools/merge/main.nf'
-include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_DESALT } from '../../modules/custom/samtools/merge/main.nf'
-include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_PBMM2 } from '../../modules/custom/samtools/merge/main.nf'
-include { SAMTOOLS_MERGE as SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_FLAIR } from '../../modules/custom/samtools/merge/main.nf'
-
 include { SAMTOOLS_INDEX as SAMTOOLS_INDEX_PBMM2 } from '../../modules/custom/samtools/index/main.nf'
 
 include { ISOTOOLS_SEGMENT as ISOTOOLS_SEGMENT_POLYA } from '../../modules/custom/isotools/segment/main.nf'
@@ -50,15 +42,12 @@ include { COLLAPSE as COLLAPSE_TWINS } from '../../modules/custom/collapse/main.
 
 workflow SPLIT_ALIGN_CLEAN_CHUNKS {
     take:
-      ch_reads                 // [ meta, reads ]
+      ch_reads                 // [ meta, reads ]; one hq or singleton FASTA per sample, meta.singleton set
       ch_genome                // [ genome ]
       ch_genome_index          // [ meta, index ]
       ch_reference_transcripts // [ meta, bed ]
-      prefix                   // string
       ch_splice_scores         // [ meta, scores ]
-      cluster_mode             // string [ per_sample, multi_sample, both ]
-      entrypoint               // string [ isoseq, map ]
-      aligner                  // string [ minimap2, ultra, pbmm2, desalt, ark, flair ]
+      aligner                  // string [ ark, mm2, ultra, desalt, pbmm2, flair ]
       aligner_use_annotation   // bool
       remove_adapters          // bool
       collapse_twins           // bool
@@ -67,16 +56,20 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
       ch_versions              // [ meta, versions.yml ]
 
     main:
+      // INFO: sample_id groups hq + singleton files of one sample later on (per-chromosome
+      // INFO: grouping, fragment reads). flnc sets it from the file name; Iso-Seq reads fall back to id.
       ch_reads = ch_reads.map { meta, reads ->
           [ meta + [ sample_id: meta.sample_id ?: meta.id ], reads ]
       }
 
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-          CHUNKING [ isoseq, map ]
+          CHUNKING [ FXSPLIT ]
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: each FASTA is split into chunks named tmp_chunk_<N>_<prefix>.fasta.gz;
+      // INFO: '_' field 2 is the chunk number. ch_fastx_gz: [ meta + [ chunk: N ], chunk.fasta.gz ]
       FXSPLIT(ch_reads)
       FXSPLIT.out.fastx_gz
           .flatMap {
@@ -96,10 +89,13 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: one alignment per chunk; meta is the chunk meta (id, sample_id, singleton, chunk).
+      // INFO: ch_aligned_bam: [ meta, bam ], ch_aligned_bai: [ meta, bai ]. They stay separate because
+      // INFO: the pass-1 modules take bam and bai as two inputs; both come from one task, so order pairs them.
       ch_aligned_bam = Channel.empty()
       ch_aligned_bai = Channel.empty()
 
-      switch (params.aligner) {
+      switch (aligner) {
         case 'ark':
             if (aligner_use_annotation) {
                 ARK_ALIGN(
@@ -203,158 +199,9 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
 
         default:
           error """
-          ERROR: Unknown aligner: '${params.aligner}'.
-          Valid aligners are: minimap2, pbmm2, desalt, ultra, flair
+          ERROR: Unknown aligner: '${aligner}'.
+          Valid aligners are: ark, mm2, ultra, desalt, pbmm2, flair
           """.stripIndent()
-      }
-
-      /*
-      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-          CLUSTERING [ isoseq, map ] + BRANCHING
-      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-      */
-
-      ch_pooled_reads = Channel.empty()
-      if (entrypoint == "isoseq") {
-        // INFO: reads were already merged in isoseq clustering
-        ch_pooled_reads = ch_reads
-      } else if (entrypoint == "map") {
-        // INFO: fastq reads need to be merged if multi-sample
-        if (cluster_mode == "per_sample") {
-          ch_pooled_reads = ch_reads
-        } else if (cluster_mode == "multi_sample") {
-          ch_aligned_bam
-              .map { meta, bam -> bam }
-              .collect()
-              .map { bams -> [
-                [
-                  id: prefix,
-                  single_end: false,
-                  singleton: false,
-                  chunk: 0
-                ], bams ] }
-              .set { ch_joined_bam }
-
-          switch (params.aligner) {
-            case 'ark':
-              SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ARK(ch_joined_bam)
-              ch_aligned_bam = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ARK.out.bam
-              ch_aligned_bai = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ARK.out.bai
-              ch_versions = ch_versions.mix(SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ARK.out.versions)
-            break
-
-            case 'mm2':
-              SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_MINIMAP2(ch_joined_bam)
-              ch_aligned_bam = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_MINIMAP2.out.bam
-              ch_aligned_bai = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_MINIMAP2.out.bai
-              ch_versions = ch_versions.mix(SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_MINIMAP2.out.versions)
-            break
-
-            case 'ultra':
-              SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ULTRA(ch_joined_bam)
-              ch_aligned_bam = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ULTRA.out.bam
-              ch_aligned_bai = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ULTRA
-              ch_versions = ch_versions.mix(SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ULTRA.out.versions)
-            break
-
-            case 'desalt':
-              SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_DESALT(ch_joined_bam)
-              ch_aligned_bam = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_DESALT.out.bam
-              ch_aligned_bai = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_DESALT.out.bai
-              ch_versions = ch_versions.mix(SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_DESALT.out.versions)
-            break
-
-            case 'pbmm2':
-              SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_PBMM2(ch_joined_bam)
-              ch_aligned_bam = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_PBMM2.out.bam
-              ch_aligned_bai = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_PBMM2.out.bai
-              ch_versions = ch_versions.mix(SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_PBMM2.out.versions)
-            break
-
-            case 'flair':
-              SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_FLAIR(ch_joined_bam)
-              ch_aligned_bam = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_FLAIR.out.bam
-              ch_aligned_bai = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_FLAIR.out.bai
-              ch_versions = ch_versions.mix(SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_FLAIR.out.versions)
-            break
-
-            default:
-              error """
-              ERROR: Unknown aligner: '${params.aligner}'.
-              Valid aligners are: ark, mm2, ultra, desalt, pbmm2, flair
-              """.stripIndent()
-              System.exit(1)
-          }
-
-          ch_reads
-            .map { meta, reads -> reads }
-            .collect()
-            .map { reads -> [ [ id: 'pooled.reads' ], reads ] }
-            .set { ch_pooled_reads }
-        } else if (cluster_mode == "both") {
-          ch_aligned_bam
-              .map { meta, bam -> bam }
-              .collect()
-              .map { bams -> [ [ id: prefix ], bams ] }
-              .set { ch_joined_bam }
-
-          switch (params.aligner) {
-            case 'ark':
-              SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ARK(ch_joined_bam)
-              ch_aligned_bam = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ARK.out.bam
-              ch_aligned_bai = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ARK.out.bai
-              ch_versions = ch_versions.mix(SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ARK.out.versions)
-            break
-
-            case 'mm2':
-              SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_MINIMAP2(ch_joined_bam)
-              ch_aligned_bam = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_MINIMAP2.out.bam
-              ch_aligned_bai = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_MINIMAP2.out.bai
-              ch_versions = ch_versions.mix(SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_MINIMAP2.out.versions)
-            break
-
-            case 'ultra':
-              SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ULTRA(ch_joined_bam)
-              ch_aligned_bam = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ULTRA.out.bam
-              ch_aligned_bai = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ULTRA
-              ch_versions = ch_versions.mix(SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_ULTRA.out.versions)
-            break
-
-            case 'desalt':
-              SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_DESALT(ch_joined_bam)
-              ch_aligned_bam = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_DESALT.out.bam
-              ch_aligned_bai = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_DESALT.out.bai
-              ch_versions = ch_versions.mix(SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_DESALT.out.versions)
-            break
-
-            case 'pbmm2':
-              SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_PBMM2(ch_joined_bam)
-              ch_aligned_bam = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_PBMM2.out.bam
-              ch_aligned_bai = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_PBMM2.out.bai
-              ch_versions = ch_versions.mix(SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_PBMM2.out.versions)
-            break
-
-            case 'flair':
-              SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_FLAIR(ch_joined_bam)
-              ch_aligned_bam = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_FLAIR.out.bam
-              ch_aligned_bai = SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_FLAIR.out.bai
-              ch_versions = ch_versions.mix(SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_FLAIR.out.versions)
-            break
-
-            default:
-              error """
-              ERROR: Unknown aligner: '${params.aligner}'.
-              Valid aligners are: ark, mm2, ultra, desalt, pbmm2, flair
-              """.stripIndent()
-              System.exit(1)
-          }
-
-          ch_reads
-            .map { meta, reads -> reads }
-            .collect()
-            .map { reads -> [ [ id: 'pooled.reads' ], reads ] }
-            .set { ch_pooled_reads }
-        }
       }
 
       /*
@@ -363,6 +210,7 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: removes adapter sequence from soft-clipped read ends; keeps the [ meta, bam ] + [ meta, bai ] shape
       if (remove_adapters) {
         ISOTOOLS_REMOVE_ADAPTERS(
           ch_aligned_bam,
@@ -379,8 +227,11 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: second pass. iso-cigar rescues missed 3' junctions (optional); iso-align then picks reads
+      // INFO: whose pass-1 split alignment hints at an intron over the pass-1 cap, to realign them below.
       ch_fragments_bam = Channel.empty()
-      if (do_second_pass && params.aligner == 'ark') {
+      if (do_second_pass && aligner == 'ark') {
+        // WARN: replacing ch_aligned_bam with [ meta, bam, bai ] on both paths
         if (cigar_extension) {
           ISOTOOLS_CIGAR_EXTENSION(
             ch_aligned_bam,
@@ -389,25 +240,35 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
             ch_reference_transcripts
           )
 
-          // WARN: replacing ch_aligned_bam with [ meta, bam, bai ]
           ch_aligned_bam = ISOTOOLS_CIGAR_EXTENSION.out.extended
-
-          ISOTOOLS_FIND_FRAGMENTS(
-            ISOTOOLS_CIGAR_EXTENSION.out.extended,
-            ch_pooled_reads
-          )
-
           ch_versions = ch_versions.mix(ISOTOOLS_CIGAR_EXTENSION.out.versions)
         } else {
-          ISOTOOLS_FIND_FRAGMENTS(
-            ch_aligned_bam.join(ch_aligned_bai),
-            ch_pooled_reads
-          )
-
-          // WARN: replacing ch_aligned_bam with [ meta, bam, bai ]
           ch_aligned_bam = ch_aligned_bam.join(ch_aligned_bai)
-          ch_versions = ch_versions.mix(ISOTOOLS_FIND_FRAGMENTS.out.versions)
         }
+
+        // INFO: iso-align needs each chunk BAM plus the chunk FASTA it was aligned from.
+        // INFO: key [ sample_id, singleton, chunk ] is set before alignment and survives every meta.clone().
+        // INFO: groupTuple + combine instead of join: inputs that collide on the key (e.g. X.fasta.gz and
+        // INFO: X.hq.fasta.gz under flnc) both reach --reads instead of being mispaired.
+        ch_fastx_gz
+            .map { meta, fasta -> [ [ meta.sample_id, meta.singleton, meta.chunk ], fasta ] }
+            .groupTuple()
+            .set { ch_chunk_reads } // [ key, [ fasta, ... ] ]
+
+        ch_aligned_bam
+            .map { meta, bam, bai -> [ [ meta.sample_id, meta.singleton, meta.chunk ], meta, bam, bai ] }
+            .combine(ch_chunk_reads, by: 0)
+            .multiMap { key, meta, bam, bai, reads ->
+                bam:   [ meta, bam, bai ]
+                reads: [ meta, reads ]
+            }
+            .set { ch_find_fragments }
+
+        ISOTOOLS_FIND_FRAGMENTS(
+          ch_find_fragments.bam,
+          ch_find_fragments.reads
+        )
+        ch_versions = ch_versions.mix(ISOTOOLS_FIND_FRAGMENTS.out.versions)
 
         /*
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -415,6 +276,8 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         */
 
+        // INFO: fragment reads [ meta + id '.fragments', fasta ] realigned with the larger intron cap
+        // INFO: (minimap2_realign_intron_size); ch_fragments_bam: [ meta, bam, bai ]
         ARK_ALIGN_FRAGMENTS(
           ISOTOOLS_FIND_FRAGMENTS.out.fasta,
           ch_genome_index,
@@ -429,6 +292,7 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
 
 
       } else {
+        // WARN: replacing ch_aligned_bam with [ meta, bam, bai ]
         ch_aligned_bam = ch_aligned_bam.join(ch_aligned_bai)
       }
 
@@ -441,12 +305,16 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
       ISOTOOLS_SEGMENT_POLYA(ch_aligned_bam) // INFO: polyA tails + cigar 
       ISOTOOLS_SEGMENT_POLYA_FRAGMENTS(ch_fragments_bam) // INFO: fragments + cigar
 
+      // INFO: hq_bed: [ meta, [ <chr>@*.hq.bed, ... ] ], one bed per chromosome per chunk.
+      // INFO: fragment beds are mixed in first so realigned reads land in the same per-chromosome groups.
       ISOTOOLS_SEGMENT_POLYA.out.hq_bed
           .mix(ISOTOOLS_SEGMENT_POLYA_FRAGMENTS.out.hq_bed)
           .set { ch_aligned_segmented }
 
+      // INFO: regroup by [ chr, sample_id ]: all chunks, hq + singleton, of one sample on one chromosome.
+      // INFO: ch_aligned_segmented_hq_per_chr: [ [ id: sample_id, single_end: true, chr ], [ beds ] ]
       ch_aligned_segmented
-          .flatMap { meta, bed ->   // ← no extra braces
+          .flatMap { meta, bed ->
               def beds = bed instanceof List ? bed : [bed]
               beds.collect { it ->
                   [ meta + [ chr: it.name.split('@')[0] ], it ]
@@ -469,6 +337,7 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: same per-chromosome shape in and out; fusion emits free (non-fusion) reads and fusions
       ch_aligned_segmented_collapsed = Channel.empty()
       if (collapse_twins) {
         COLLAPSE_TWINS(ch_aligned_segmented_hq_per_chr)

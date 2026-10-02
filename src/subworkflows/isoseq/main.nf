@@ -34,19 +34,29 @@ workflow ISOSEQ {
       ccs_chunk              // int
       isoseq_cluster2_mode   // string
       prefix                 // string
-      entrypoint             // [ subreads, ccs, refine ] (flnc unreachable)
+      entrypoint             // [ subreads, ccs, refine, cluster ] (flnc unreachable)
       is_kinnex_library      // bool
 
     main:
+      // INFO: stage each entrypoint enters at (input dir in brackets):
+      //   subreads [raw subreads]      -> PBCCS -> SKERA (Kinnex only) -> LIMA -> ISOSEQ_REFINE -> ISOSEQ_CLUSTER2
+      //   ccs      [CCS BAMs]          -> SKERA (Kinnex only) -> LIMA -> ISOSEQ_REFINE -> ISOSEQ_CLUSTER2
+      //   refine   [02_LIMA]           -> ISOSEQ_REFINE -> ISOSEQ_CLUSTER2
+      //   cluster  [03_ISOSEQ_REFINE]  -> ISOSEQ_CLUSTER2
       ch_versions = Channel.empty()
-      ch_primers = Channel.value(file(global_primers, checkIfExists: true))
+
+      // WARN: only LIMA and ISOSEQ_REFINE read primers; cluster runs neither, so the file is not required or opened
+      ch_primers = entrypoint == 'cluster'
+          ? Channel.empty()
+          : Channel.value(file(global_primers, checkIfExists: true))
 
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-          CHANNELING/INDEXING [ SUBREADS, CCS, LIMA OUTPUTS ]
+          CHANNELING/INDEXING [ SUBREADS, CCS, LIMA OUTPUTS, REFINE OUTPUTS ]
      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: every *.bam in global_input_dir -> [ [id: file name w/o .bam, single_end, indexed], bam, pbi or [] ]
       Channel
           .fromPath("${global_input_dir}/*.bam", checkIfExists: true)
           .map { bam ->
@@ -64,6 +74,7 @@ workflow ISOSEQ {
           .set { ch_bam }
 
 
+      // INFO: PacBio tools need a .pbi next to each BAM; build it only where it is missing
       ch_bam
           .branch {
               indexed:     it[0].indexed
@@ -89,15 +100,17 @@ workflow ISOSEQ {
               [ meta_updated, bam, pbi ]
           }.set { ch_bam_reindexed }
 
+      // INFO: ch_bam is now [ [id, single_end, indexed: true], bam, pbi ] for every input BAM
       ch_bam = ch_bam_branched.indexed.mix(ch_bam_reindexed)
       ch_versions = ch_versions.mix(PBINDEX.out.versions)
 
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-          ENTRYPOINT BRANCHING  [ SUBREADS, CCS, REFINE ]
+          ENTRYPOINT BRANCHING  [ SUBREADS, CCS, REFINE, CLUSTER ]
      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
-  
+
+      // INFO: ch_ccs_bams = [ meta, bam, pbi ] CCS reads for Skera/LIMA; stays empty for refine and cluster
       ch_ccs_bams = Channel.empty()
       switch (entrypoint) {
         case 'subreads':
@@ -131,7 +144,7 @@ workflow ISOSEQ {
               .set { ch_pbccs_merged }
 
           PBMERGE(ch_pbccs_merged) // INFO: merge chunks
-          ch_ccs_bams = PBMERGE.out.bam.join(PBMERGE.out.pbi)
+          ch_ccs_bams = PBMERGE.out.bam.join(PBMERGE.out.pbi) // INFO: [ [id: movie, single_end], bam, pbi ]
 
           ch_versions = ch_versions.mix(PBMERGE.out.versions)
           ch_versions = ch_versions.mix(PBCCS.out.versions)
@@ -146,9 +159,13 @@ workflow ISOSEQ {
           // LIMA BAMs are already demultiplexed and primer-trimmed.
         break
 
+        case 'cluster':
+          // INFO: refined (FLNC) BAMs are picked up at ISOSEQ_REFINE below and go straight to clustering
+        break
+
         default:
           error """
-          ERROR: Unknown entrypoint -> options at this step are: subreads, ccs, refine
+          ERROR: Unknown entrypoint -> options at this step are: subreads, ccs, refine, cluster
           """.stripIndent()
           System.exit(1)
       }
@@ -159,8 +176,9 @@ workflow ISOSEQ {
      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: Kinnex arrays hold several transcripts per read; Skera splits them before LIMA (meta unchanged)
       ch_skera_demux_bams = Channel.empty()
-      if (entrypoint != 'refine' && is_kinnex_library) {
+      if (!(entrypoint in ['refine', 'cluster']) && is_kinnex_library) {
         WGET_SKERA_PRIMERS(
           Channel.value(
             params.skera_kinnex_primers
@@ -184,10 +202,12 @@ workflow ISOSEQ {
      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: LIMA demultiplexes by primer pair and writes one <id>_fl.<5p>--<3p>.bam per pair found
+      // INFO: refine reads those BAMs back from 02_LIMA; cluster skips LIMA, so the channel stays empty
       ch_lima_out_bams = Channel.empty()
       if (entrypoint == 'refine') {
           ch_lima_out_bams = ch_bam
-      } else {
+      } else if (entrypoint != 'cluster') {
           LIMA(ch_skera_demux_bams, ch_primers)
           ch_lima_out_bams = LIMA.out.bam
               .flatMap { meta, bams ->
@@ -200,6 +220,8 @@ workflow ISOSEQ {
       }
 
       // Keep one item per primer/barcode pair for both fresh runs and checkpoints.
+      // INFO: meta becomes [ ..., id: <movie>.<5p>--<3p>, parent_id: <movie>, barcode: <5p>--<3p> ];
+      // INFO: this id is the sample id from here on (03_ISOSEQ_REFINE files are named <id>_flnc.bam)
       ch_lima_out_bams = ch_lima_out_bams.map { meta, bam, pbi ->
           def matcher = bam.baseName =~ /^(.*)\.([^.]+--[^.]+)$/
           if (!matcher.matches()) error "Unexpected LIMA BAM name: ${bam.name}"
@@ -217,7 +239,20 @@ workflow ISOSEQ {
      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
-      ISOSEQ_REFINE(ch_lima_out_bams, ch_primers) // INFO: discard CCS without polyA tails
+      // INFO: ch_refined_bams = [ meta, <id>_flnc.bam ], the single input of every clustering branch below
+      ch_refined_bams = Channel.empty()
+      if (entrypoint == 'cluster') {
+          // INFO: restart from 03_ISOSEQ_REFINE; strip _flnc.bam to recover the sample id the full run used
+          ch_refined_bams = ch_bam.map { meta, bam, _pbi ->
+              def matcher = bam.name =~ /^(.+)_flnc\.bam$/
+              if (!matcher.matches()) error "Unexpected refined BAM name: ${bam.name}"
+              [ [ id: matcher.group(1), single_end: true ], bam ]
+          }
+      } else {
+          ISOSEQ_REFINE(ch_lima_out_bams, ch_primers) // INFO: discard CCS without polyA tails
+          ch_refined_bams = ISOSEQ_REFINE.out.bam
+          ch_versions = ch_versions.mix(ISOSEQ_REFINE.out.versions)
+      }
 
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -226,9 +261,12 @@ workflow ISOSEQ {
       */
 
       // Refine each sample once; only clustering needs separate and pooled branches.
+      // INFO: per_sample clusters each sample alone; multi_sample pools all samples into one set named global_prefix;
+      // INFO: both runs the two from the same refined reads. BAM_TO_FA splits each result into hq and singletons
+      // INFO: and adds meta.singleton (false / true); meta.sample_id is set later in SPLIT_ALIGN (falls back to id).
       ch_pbccs_merged_flnc_clustered_fa = Channel.empty()
       if (isoseq_cluster2_mode in ['per_sample', 'both']) {
-        ISOSEQ_CLUSTER2(ISOSEQ_REFINE.out.bam) // INFO: cluster reads
+        ISOSEQ_CLUSTER2(ch_refined_bams) // INFO: cluster reads, one task per sample id
         BAM_TO_FA(ISOSEQ_CLUSTER2.out.bam)
 
         ch_pbccs_merged_flnc_clustered_fa  = ch_pbccs_merged_flnc_clustered_fa.mix(BAM_TO_FA.out.singletons)
@@ -240,7 +278,8 @@ workflow ISOSEQ {
 
       if (isoseq_cluster2_mode in ['multi_sample', 'both']) {
         // cluster2 accepts a FOFN, so pooling does not need an intermediate BAM merge.
-        ISOSEQ_REFINE.out.bam
+        // INFO: per-sample metas are dropped; the pooled item is [ [id: global_prefix, single_end], [bams] ]
+        ch_refined_bams
           .map { meta, bam -> bam  }
           .collect()
           .map { bams -> [ [ id: prefix, single_end: true ], bams ] }
@@ -256,14 +295,6 @@ workflow ISOSEQ {
         ch_versions = ch_versions.mix(ISOSEQ_CLUSTER2_MULTI_SAMPLE.out.versions)
       }
 
-      /*
-      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-          VERSIONING
-     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-      */
-
-      ch_versions = ch_versions.mix(ISOSEQ_REFINE.out.versions)
-
     /*
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         OUTPUT CHANNELS
@@ -271,7 +302,7 @@ workflow ISOSEQ {
     */
 
     emit:
-        reads   = ch_pbccs_merged_flnc_clustered_fa
+        reads   = ch_pbccs_merged_flnc_clustered_fa // [ meta + [singleton], <id>.{hq,singletons}.fasta.gz ]
         versions = ch_versions
 }
 

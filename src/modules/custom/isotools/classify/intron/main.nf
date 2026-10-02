@@ -16,6 +16,7 @@ process ISOTOOLS_CLASSIFY_INTRON {
 
     output:
     tuple val(meta), path("*.tsv")      , optional: true, emit: tsv
+    tuple val(meta), path("*.introns_track.bed"), optional: true, emit: track
     path "versions.yml"                                 , emit: versions
 
     when:
@@ -39,6 +40,13 @@ process ISOTOOLS_CLASSIFY_INTRON {
         --outdir . \\
         $args
 
+    # INFO: isotools names the --intron-track file '<prefix>.introns_track,bed' (comma typo upstream)
+    if [ -s "${prefix}.introns_track,bed" ]; then
+        mv "${prefix}.introns_track,bed" ${prefix}.introns_track.bed
+    else
+        rm -f "${prefix}.introns_track,bed"
+    fi
+
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
         iso-classify: \$( iso-classify --version | sed 's/iso-classify //g' )
@@ -49,6 +57,7 @@ process ISOTOOLS_CLASSIFY_INTRON {
     def prefix = task.ext.prefix ?: "${meta.id}"
     """
     touch ${prefix}.tsv
+    touch ${prefix}.introns_track.bed
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":

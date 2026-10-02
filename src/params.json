@@ -1,6 +1,6 @@
 {
     "_comment": "Copy this file, fill in your paths, and pass it with: nextflow run main.nf -params-file my_params.json",
-    "// 1)": "Entrypoint / Global input options [ entrypoint: subreads, ccs, refine, flnc ] ───────────────────────────────────",
+    "// 1)": "Entrypoint / Global input options [ entrypoint: subreads, ccs, refine, cluster, flnc ] ───────────────────────────────────",
     "entrypoint": "subreads",
     "global_input_dir": "",
     "global_output_dir": "",
@@ -31,7 +31,6 @@
     "// 3.2)": "Ultra options ────────────────────────────────────────",
     "ultra_index": null,
     "ultra_use_annotation": true,
-    "ultra_do_second_pass": true,
 
     "// 3.3)": "deSALT options ────────────────────────────────────────",
     "desalt_index": null,
