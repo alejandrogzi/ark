@@ -55,6 +55,56 @@
 
 # Changelog
 
+## [v2.0.27] - 2026-10-02
+
+This release fixes a dead second pass (fragment detection never ran for any current entrypoint), adds a `cluster` checkpoint that restarts from refined reads, and wires the iso-classify intron track end to end. The trackDb template is now generated inline instead of read from disk, the genome-browser upload wiring is corrected, and resume after alignment works again. A batch of smaller correctness fixes (thread flag, collapse prefix, splicing channel shapes, aligner plumbing) is included, along with an extended stub harness and a CI trigger correction. CI gold has to be regenerated (see below).
+
+### Fragment detection fix and post-alignment merge removal
+
+- `ISOTOOLS_FIND_FRAGMENTS` was never submitted: it consumed `ch_pooled_reads`, which was only filled for the legacy `isoseq` / `map` entrypoints removed in v2.0.25, so the process and the three processes behind it (`ARK_ALIGN_FRAGMENTS`, `SAMTOOLS_BAM_FRAGMENTS`, `ISOTOOLS_SEGMENT_POLYA_FRAGMENTS`) ran zero times with `ark` + second pass on, for every entrypoint.
+- Each chunk BAM now gets back the chunk FASTA it was aligned from. `FXSPLIT` already emits those, and `sample_id`, `singleton`, and `chunk` survive every `meta.clone()`, so they form the key: chunk FASTAs are grouped by `[ sample_id, singleton, chunk ]` (`groupTuple`) and combined with the aligned BAMs (`combine(by: 0)`, `multiMap`), so colliding inputs (e.g. `X.fasta.gz` and `X.hq.fasta.gz` under `flnc`) both reach `--reads` instead of being mispaired. One code path covers every entrypoint with cigar extension on or off, and versions are mixed on both paths.
+- The post-alignment `map` + `multi_sample` / `both` merge branch is deleted, not revived: `flnc` stays per-sample, as since v2.0.25. With it go the seven `SAMTOOLS_MERGE_BAM_MULTI_SAMPLE_*` includes, their `withName` blocks, the deleted `src/modules/custom/samtools/merge/main.nf`, and the now-readerless `prefix`, `cluster_mode`, and `entrypoint` inputs of `SPLIT_ALIGN_CLEAN_CHUNKS`. `isoseq_cluster2_mode` therefore only affects the Iso-Seq entrypoints, where pooling happens before clustering. Reasons: the merged BAM was segmented with a single `--singleton` setting (singleton reads lost their `SG` tag), `both` / `multi_sample` are the defaults so ordinary `flnc` runs would change sample names, the merged BAM went through cigar extension and segmentation unchunked, and separately clustered files share read names (`transcript/N`) that `iso-align` groups by.
+- `ISOTOOLS_FIND_FRAGMENTS` now publishes to `06_ARK_ALIGN/FRAGMENTS` next to the other ark fragment outputs (it never published anything, so nothing moves) with `ext.prefix = <id>.<chunk>[.singleton]`, since `meta.id` is shared by every chunk of a sample and outputs would otherwise overwrite each other.
+
+### New checkpoint: `--entrypoint cluster`
+
+- Restarts from `03_ISOSEQ_REFINE`: reads every `*_flnc.bam`, skips CCS, Skera, LIMA, and refine, and goes straight to `ISOSEQ_CLUSTER2` under the same `isoseq_cluster2_mode` rules (`per_sample` / `multi_sample` / `both`).
+- The sample id is the BAM name without `_flnc.bam`, i.e. the id the full pipeline gives that sample (`<movie>.<5p>--<3p>`); a BAM not ending in `_flnc.bam` is an error.
+- `--global_primers` is not required and never opened for this entrypoint. Added to the validator in `src/main.nf`, the preprocessing Iso-Seq branch, `nextflow.config`, `params.json`, and the README alongside the `refine` checkpoint.
+
+### Intron BED4 track end to end
+
+- `iso-classify intron` now runs with `--intron-track`. The module emits the track as a second output, renames the upstream comma typo (`<prefix>.introns_track,bed` -> `<prefix>.introns_track.bed`, fixed upstream in isotools), and drops the file when empty.
+- `PREPOLISH` emits `intron_track`; `workflows/ark.nf` groups it by `meta.name` through `JOIN_INTRONS` (sorted BED in `12_POLISH/BED/<name>.introns.bed`) and `BEDTOBIGBED_INTRONS` without autosql (BED4), mixed into `ch_additional_bbs` so it lands in `12_POLISH/BB` with the fusion and NMD tracks. `POLISH` additionally emits `rt`, and `JOIN_INTRONS` was added to the `12_POLISH/BED` publish pattern in `nextflow.config`.
+
+### TrackDb generated, upload wiring fixed
+
+- `TRACKDB` no longer reads `assets/as/track.as` (the path was wrong twice: single-quoted `${projectDir}` plus one `..` too many). The stanza is now a heredoc inside the module like the autosql schemas, so the `sed` step and the `schema` input are gone. `assets/as/` is deleted: `track.as` moved into the module, `base.as` / `schema.as` were stale copies that still said `isopipe`. Version reporting switches from `sed` to `bash`.
+- Fixed while moving the template, because each `bigDataUrl` must equal the file `RSYNC_SSH` uploads: `retention.bb` -> `retentions.bb`, `truncation.bb` -> `truncations.bb`, `orphans.bb` -> `pass.scraps.bb`, `duplicates.bb` -> `pass.duplicates.bb`. The `{BIGWIG_TRACK}` placeholder was never substituted and reached the output literally; it is now `<track>_bigwig`. The `spliceai.acceptor.reverse` subtrack pointed at the `aparent.forward` file.
+- `workflows/ark.nf` now loads `scraps` instead of the never-existing `ISOTOOLS_POLISH.out.orphans` (which broke `load_track = true`), feeds `LOAD_NMD_TRACK` the per-sample bigBed instead of the per-chromosome BEDs, and adds `LOAD_RT_TRACK` for the `rt` subtrack the trackDb always listed but never uploaded.
+
+### Resume and correctness fixes
+
+- Resume after alignment produced nothing with the default `minimap2_align_keep_sam = false`: `SAMTOOLS_BAM` deletes the SAM, `MINIMAP2_ALIGN` declared it `optional: true`, and on `-resume` the cached aligner emitted nothing while everything downstream was silently skipped (exit 0, no results). The `sam` output is required again, so a cached task with a missing SAM is re-executed. Output declarations are not part of the task hash, so nothing is invalidated.
+- `SAMTOOLS_BAM` ran `samtools index -@ {task.cpus}` (missing `$`), i.e. single-threaded; fixed to `-@ ${task.cpus}`. This changes the task hash of every BAM conversion: runs resumed across this change redo BAM conversion and everything after it.
+- `COLLAPSE` built its prefix with `".${meta.chr}" ?: ''` (always truthy), producing `*.pass.null.collapsed.bed`; fixed to `<sample>.pass.collapsed.bed`. Gold path changes.
+- `splicing/main.nf` called `GUNZIP_MINISPLICE` without including it (included now); the `def x = f(<take input>)` declarations that Nextflow 24.10 refuses to compile are gone, so the pipeline compiles on 24.10.5 and 25.10.2; `SPLICEAI_RUN`'s bare directory is wrapped as `[ meta, dir ]` for `SPLICEAI_DERIVE` and emitted as `bigwigs`, so intron classification also sees pipeline-computed bigWigs.
+- `SPLIT_ALIGN_CLEAN_CHUNKS` and `PREPROCESSING` ignored their `aligner` take-input and read `params.aligner`; they use the input now, and the unknown-aligner messages list `ark`.
+- `PREPROCESSING` overwrote `ch_versions` on the custom-FASTA database path instead of mixing into it.
+- Removed with no caller left: `ISOTOOLS_FIND_FRAGMENTS_ULTRA` / `_DESALT` `withName` blocks, the `samtools/merge` module, the two `GAWK_JOIN_BEDGRAPH_*` includes in `prepolish`, and the `ultra_do_second_pass` parameter in `params.json`.
+
+### CI and test harness
+
+- `ci.yml` now triggers on `master` (the default branch), not `main`.
+- Extended `assets/ci/test_isoseq.py` with stub `iso-cigar` / `iso-align` (`iso-align` asserts `--bam` and every `--reads` exist) and distinct genome/annotation names: `refine` per/multi/both, `flnc` two-sample, and `cluster` (no `lima`/`refine`, same `cluster2` ids as `refine`, non-`_flnc` rejected) with the second pass on and cigar extension on/off, asserting `iso-align` runs once per chunk BAM with exactly that chunk's FASTA and that `samtools merge` is never called; malformed LIMA/refined names fail before any tool runs; the CLI validator covers `refine` needing primers, `cluster` not needing them, and unknown entrypoints.
+
+### Chores
+
+- Bumped the pipeline version to 2.0.27 in the Nextflow manifest.
+- Documented the new `cluster` value in the `entrypoint` comments/validation (`subreads, ccs, refine, cluster, flnc`) and the full aligner set (`ark, mm2, ultra, desalt, pbmm2, flair`).
+- Added `INFO`/`WARN` channel-shape comments across `genome`, `spliceai`, `splicing`, `prepolish`, `polish`, `split_align`, `track`, and `workflows/ark.nf` with no logic change.
+- Gold has to be regenerated from a real containerised run: new `06_ARK_ALIGN/FRAGMENTS/*.report.tsv` (plus fragment outputs where reads qualify), `11_PREPOLISH/CLASSIFY/*.introns_track.bed`, `12_POLISH/BED/*.introns.bed`, possible downstream line-count shifts from fragment realignment, and the `*.pass.null.collapsed.bed` -> `*.pass.collapsed.bed` rename. The `subreads` gold already predates the primer-pair sample ids. CI will be red until gold is regenerated.
+
 ## [v2.0.26] - 2026-07-31
 
 This release adds native support for Kinnex/MAS-Seq libraries through skera-based demultiplexing, and reworks the primer-removal and refinement segment of the ISOSEQ subworkflow so that per-primer-pair reads are tracked individually instead of being merged back into a single pool. The new `skera_is_kinnex_library` parameter activates a `PBSKERA_SPLIT` step between CCS generation and LIMA, with the MAS-Seq adapter primer set downloaded automatically at runtime when the option is enabled. On the refinement side, the LIMA output channel was restructured from the ground up: the multi-sample merge that previously collapsed per-barcode BAMs back into one file has been removed entirely, and each barcode-specific BAM is now paired with its `.pbi` index and handed to ISOSEQ_REFINE as an independent tuple. Several entrypoint dispatch and versioning-channel corrections carried over from the v2.0.25 maintenance cycle are included as well, along with a LIMA container update, a dedicated high-core resource label, and a number of output-emission fixes in the new skera module.
