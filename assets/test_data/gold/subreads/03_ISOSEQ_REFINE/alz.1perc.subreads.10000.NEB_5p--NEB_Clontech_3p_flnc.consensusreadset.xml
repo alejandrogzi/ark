@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<pbds:ConsensusReadSet CreatedAt="2026-10-02T14:38:40.611Z" MetaType="PacBio.DataSet.ConsensusReadSet" Name="alz.1perc.subreads.10000.NEB_5p--NEB_Clontech_3p_flnc.bam" Tags="hidden" TimeStampedName="alz.1perc.subreads.10000.NEB_5p--NEB_Clontech_3p_flnc.bam-261002_143840611" UniqueId="26eab592-bd20-4c97-9671-0be4e763979e" Version="3.0.1" xmlns="http://pacificbiosciences.com/PacBioDatasets.xsd" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://pacificbiosciences.com/PacBioDatasets.xsd" xmlns:pbbase="http://pacificbiosciences.com/PacBioBaseDataModel.xsd" xmlns:pbds="http://pacificbiosciences.com/PacBioDatasets.xsd">
+	<pbbase:ExternalResources>
+		<pbbase:ExternalResource CreatedAt="2026-10-02T14:38:40.611Z" MetaType="PacBio.ConsensusReadFile.ConsensusReadBamFile" ResourceId="/home/alejandro/ark-gold-runs/subreads/work/59/5c761803dfa3f4ab3eae0a75b24598/alz.1perc.subreads.10000.NEB_5p--NEB_Clontech_3p_flnc.bam" TimeStampedName="pacbio_consensusreadfile_consensusreadbamfile-261002_143840611" UniqueId="3c9f0c3e-4cd2-4800-9f50-4d4aa5cde55f" Version="3.0.1">
+			<pbbase:FileIndices>
+				<pbbase:FileIndex CreatedAt="2026-10-02T14:38:40.611Z" MetaType="PacBio.Index.PacBioIndex" ResourceId="/home/alejandro/ark-gold-runs/subreads/work/59/5c761803dfa3f4ab3eae0a75b24598/alz.1perc.subreads.10000.NEB_5p--NEB_Clontech_3p_flnc.bam.pbi" TimeStampedName="pacbio_index_pacbioindex-261002_143840611" UniqueId="4c5168b3-c748-4f0c-947f-200ce84d8fbc" Version="3.0.1" />
+			</pbbase:FileIndices>
+		</pbbase:ExternalResource>
+	</pbbase:ExternalResources>
+	<pbds:DataSetMetadata>
+		<pbds:TotalLength>723008</pbds:TotalLength>
+		<pbds:NumRecords>273</pbds:NumRecords>
+	</pbds:DataSetMetadata>
+</pbds:ConsensusReadSet>
