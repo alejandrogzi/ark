@@ -35,8 +35,17 @@ def validateFullRun() {
       problems << 'missing required --global_primers'
     }
 
-    if (!(params.isoseq_cluster2_mode in ['per_sample', 'multi_sample', 'both'])) { 
-      problems << 'ERROR: Unknown isoseq_cluster2_mode option -> options are: per_sample, multi_sample, both'
+    // INFO: an old params file would otherwise fall back silently to the cluster_mode default
+    if (params.containsKey('isoseq_cluster2_mode')) {
+      problems << 'isoseq_cluster2_mode was renamed to cluster_mode'
+    }
+
+    if (!(params.cluster_mode in ['per_sample', 'multi_sample', 'both'])) {
+      problems << 'ERROR: Unknown cluster_mode option -> options are: per_sample, multi_sample, both'
+    }
+
+    if (!(params.cluster_engine in ['isoseq', 'cdhit', 'rattle'])) {
+      problems << 'ERROR: Unknown cluster_engine option -> options are: isoseq, cdhit, rattle'
     }
 
     if (!(params.aligner in ['mm2', 'ultra', 'desalt', 'pbmm2', 'flair', 'ark'])) { 

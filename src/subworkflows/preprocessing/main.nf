@@ -43,7 +43,8 @@ workflow PREPROCESSING {
       genome                 // path
       annotation             // path
       ccs_chunk              // int
-      isoseq_cluster2_mode   // string
+      cluster_mode           // string [ per_sample, multi_sample, both ]
+      cluster_engine         // string [ isoseq, cdhit, rattle ]
       protein_database       // path
       custom_database        // path
       raw_database           // path
@@ -317,14 +318,16 @@ workflow PREPROCESSING {
       */
 
       // INFO: every entrypoint ends here with ch_reads = [ meta, reads FASTA/FASTQ ] for SPLIT_ALIGN
-      // INFO: Iso-Seq entrypoints: BAMs -> ISOSEQ (CCS/LIMA/refine/cluster2 from the stage the entrypoint names)
+      // INFO: Iso-Seq entrypoints: BAMs -> ISOSEQ (CCS/LIMA/refine/cluster2 from the stage the entrypoint names);
+      // INFO: cluster_engine cdhit/rattle replaces cluster2, and its cluster entrypoint also takes FASTA/FASTQ
       ch_reads = Channel.empty()
       if (entrypoint in ['subreads', 'ccs', 'refine', 'cluster']) {
           ISOSEQ(
               global_input_dir,
               global_primers,
               ccs_chunk,
-              isoseq_cluster2_mode,
+              cluster_mode,
+              cluster_engine,
               global_prefix,
               entrypoint,
               is_kinnex_library
@@ -357,7 +360,7 @@ workflow PREPROCESSING {
 
           POOL_READS(
               ch_flnc_reads,
-              isoseq_cluster2_mode,
+              cluster_mode,
               global_prefix
           )
           ch_reads = ch_reads.mix(POOL_READS.out.reads)

@@ -21,6 +21,10 @@ include { ISOSEQ_CLUSTER2 as ISOSEQ_CLUSTER2_MULTI_SAMPLE } from '../../modules/
 include { BAM_TO_FA } from '../../modules/custom/bamtofa/main.nf'
 include { BAM_TO_FA as BAM_TO_FA_MULTI_SAMPLE } from '../../modules/custom/bamtofa/main.nf'
 
+include { SAMTOOLS_FASTA } from '../../modules/custom/samtools/fasta/main.nf'
+include { CDHIT_EST } from '../../modules/custom/cdhit/est/main.nf'
+include { RATTLE } from '../../modules/custom/rattle/main.nf'
+
 /*
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     WORKFLOW
@@ -32,7 +36,8 @@ workflow ISOSEQ {
       global_input_dir       // path
       global_primers         // path
       ccs_chunk              // int
-      isoseq_cluster2_mode   // string
+      cluster_mode           // string [ per_sample, multi_sample, both ]
+      cluster_engine         // string [ isoseq, cdhit, rattle ]
       prefix                 // string
       entrypoint             // [ subreads, ccs, refine, cluster ] (flnc unreachable)
       is_kinnex_library      // bool
@@ -43,6 +48,8 @@ workflow ISOSEQ {
       //   ccs      [CCS BAMs]          -> SKERA (Kinnex only) -> LIMA -> ISOSEQ_REFINE -> ISOSEQ_CLUSTER2
       //   refine   [02_LIMA]           -> ISOSEQ_REFINE -> ISOSEQ_CLUSTER2
       //   cluster  [03_ISOSEQ_REFINE]  -> ISOSEQ_CLUSTER2
+      // INFO: cluster_engine cdhit/rattle swaps ISOSEQ_CLUSTER2 + BAM_TO_FA for SAMTOOLS_FASTA -> CDHIT_EST/RATTLE;
+      // INFO: their cluster entrypoint also takes tag-less FASTA/FASTQ (e.g. SRA reads)
       ch_versions = Channel.empty()
 
       // WARN: only LIMA and ISOSEQ_REFINE read primers; cluster runs neither, so the file is not required or opened
@@ -56,9 +63,25 @@ workflow ISOSEQ {
      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
-      // INFO: every *.bam in global_input_dir -> [ [id: file name w/o .bam, single_end, indexed], bam, pbi or [] ]
+      // INFO: cluster also reads FASTA/FASTQ: [ [id: file name w/o .fast[aq](.gz), single_end], fastx ]
+      def input_glob = entrypoint == 'cluster' ? '*.{bam,fasta,fasta.gz,fastq,fastq.gz}' : '*.bam'
       Channel
-          .fromPath("${global_input_dir}/*.bam", checkIfExists: true)
+          .fromPath("${global_input_dir}/${input_glob}", checkIfExists: true)
+          .branch { f ->
+              bam:   f.name.endsWith('.bam')
+              fastx: true
+          }
+          .set { ch_input }
+
+      ch_fastx = ch_input.fastx.map { fastx ->
+          if (cluster_engine == 'isoseq') {
+              error "ERROR: ${fastx.name} carries no PacBio tags for isoseq cluster2; use --cluster_engine cdhit or rattle"
+          }
+          [ [ id: fastx.name.replaceFirst(/\.fast[aq](\.gz)?$/, ''), single_end: true ], fastx ]
+      }
+
+      // INFO: every *.bam in global_input_dir -> [ [id: file name w/o .bam, single_end, indexed], bam, pbi or [] ]
+      ch_input.bam
           .map { bam ->
               def pbi = bam + '.pbi'
               return [
@@ -75,9 +98,11 @@ workflow ISOSEQ {
 
 
       // INFO: PacBio tools need a .pbi next to each BAM; build it only where it is missing
+      // INFO: (cluster BAMs bound for cdhit/rattle only meet samtools, so they need none)
+      def needs_pbi = !(entrypoint == 'cluster' && cluster_engine != 'isoseq')
       ch_bam
           .branch {
-              indexed:     it[0].indexed
+              indexed:     it[0].indexed || !needs_pbi
               not_indexed: true
           }
           .set { ch_bam_branched }
@@ -265,7 +290,7 @@ workflow ISOSEQ {
       // INFO: both runs the two from the same refined reads. BAM_TO_FA splits each result into hq and singletons
       // INFO: and adds meta.singleton (false / true); meta.sample_id is set later in SPLIT_ALIGN (falls back to id).
       ch_pbccs_merged_flnc_clustered_fa = Channel.empty()
-      if (isoseq_cluster2_mode in ['per_sample', 'both']) {
+      if (cluster_engine == 'isoseq' && cluster_mode in ['per_sample', 'both']) {
         ISOSEQ_CLUSTER2(ch_refined_bams) // INFO: cluster reads, one task per sample id
         BAM_TO_FA(ISOSEQ_CLUSTER2.out.bam)
 
@@ -276,7 +301,7 @@ workflow ISOSEQ {
         ch_versions = ch_versions.mix(BAM_TO_FA.out.versions)
       }
 
-      if (isoseq_cluster2_mode in ['multi_sample', 'both']) {
+      if (cluster_engine == 'isoseq' && cluster_mode in ['multi_sample', 'both']) {
         // cluster2 accepts a FOFN, so pooling does not need an intermediate BAM merge.
         // INFO: per-sample metas are dropped; the pooled item is [ [id: global_prefix, single_end], [bams] ]
         ch_refined_bams
@@ -293,6 +318,40 @@ workflow ISOSEQ {
 
         ch_versions = ch_versions.mix(BAM_TO_FA_MULTI_SAMPLE.out.versions)
         ch_versions = ch_versions.mix(ISOSEQ_CLUSTER2_MULTI_SAMPLE.out.versions)
+      }
+
+      if (cluster_engine != 'isoseq') {
+        // INFO: neither engine reads BAM: refined BAMs become FASTA once (both modes reuse it);
+        // INFO: cluster-entrypoint FASTA/FASTQ go in as they are. Items: [ meta, reads ]
+        SAMTOOLS_FASTA(ch_refined_bams)
+        ch_engine_reads = SAMTOOLS_FASTA.out.fasta.mix(ch_fastx)
+        ch_versions = ch_versions.mix(SAMTOOLS_FASTA.out.versions)
+
+        ch_engine_in = Channel.empty()
+        if (cluster_mode in ['per_sample', 'both']) {
+          ch_engine_in = ch_engine_in.mix(ch_engine_reads)
+        }
+        if (cluster_mode in ['multi_sample', 'both']) {
+          // INFO: one task takes every file of the pool (rattle reads them all, cd-hit merges in-task);
+          // INFO: sorted by name since cd-hit is order-dependent. [ [id: global_prefix, single_end], [reads] ]
+          ch_engine_in = ch_engine_in.mix(
+            ch_engine_reads
+              .map { meta, reads -> reads }
+              .collect(sort: { a, b -> a.name <=> b.name })
+              .map { reads -> [ [ id: prefix, single_end: true ], reads ] }
+          )
+        }
+
+        // INFO: same contract as BAM_TO_FA: [ meta + [singleton], <id>.{hq,singletons}.fasta.gz ]
+        if (cluster_engine == 'cdhit') {
+          CDHIT_EST(ch_engine_in)
+          ch_pbccs_merged_flnc_clustered_fa = CDHIT_EST.out.singletons.mix(CDHIT_EST.out.hq)
+          ch_versions = ch_versions.mix(CDHIT_EST.out.versions)
+        } else {
+          RATTLE(ch_engine_in)
+          ch_pbccs_merged_flnc_clustered_fa = RATTLE.out.singletons.mix(RATTLE.out.hq)
+          ch_versions = ch_versions.mix(RATTLE.out.versions)
+        }
       }
 
     /*

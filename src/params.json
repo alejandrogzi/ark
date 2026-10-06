@@ -11,10 +11,12 @@
     "global_prefix": "",
     "global_species_name": "",
 
-    "// 2)": "CCS / Isoseq cluster options [ clustering: per_sample, multi_sample, both; flnc pools inputs the same way ] ─────",
+    "// 2)": "CCS / cluster options [ cluster_mode: per_sample, multi_sample, both; flnc pools inputs the same way | cluster_engine: isoseq, cdhit, rattle ] ─────",
     "ccs_chunk": 1000,
     "skera_is_kinnex_library": false,
-    "isoseq_cluster2_mode": "multi_sample",
+    "cluster_mode": "multi_sample",
+    "cluster_engine": "isoseq",
+    "cdhit_identity": 0.99,
 
     "// 2b)": "Chunking options ────────────────────────────────────────",
     "fxsplit_chunk_size": 50000,

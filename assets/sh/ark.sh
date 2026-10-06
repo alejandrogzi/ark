@@ -92,7 +92,7 @@ cat > "${run_dir}/params.json" <<EOF
 
     "// 2)": "CCS / Isoseq cluster options [ clustering: per_sample, multi_sample, both ] ─────",
     "ccs_chunk": 1000,
-    "isoseq_cluster2_mode": "multi_sample",
+    "cluster_mode": "multi_sample",
 
     "// 2b)": "Chunking options ────────────────────────────────────────",
     "fxsplit_chunk_size": 50000,

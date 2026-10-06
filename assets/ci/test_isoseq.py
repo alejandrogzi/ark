@@ -17,9 +17,12 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 NEXTFLOW = sys.argv[1] if len(sys.argv) > 1 else "nextflow"
 TOOLS = r'''#!/usr/bin/env python3
-import json, os, shutil, sys
+import gzip, json, os, shutil, sys
 from pathlib import Path
 name, args = Path(sys.argv[0]).name, sys.argv[1:]
+if name == 'cd-hit-est' and args == ['-h']:
+    print('\t\t====== CD-HIT version test (built on today) ======')
+    sys.exit(0)
 if '--version' in args:
     print(name + ' ' + (' '.join(args[:-1]) + ' ' if name == 'isoseq' else '') + 'test')
     sys.exit(0)
@@ -59,10 +62,37 @@ elif name == 'samtools':
         Path(option('-o')).write_text(sys.stdin.read())
     elif args[0] == 'index':
         Path(args[-1] + '.bai').touch()
+    elif args[0] == 'fasta' and '-0' in args:
+        # SAMTOOLS_FASTA: three reads per BAM, named after it, so pooled inputs are traceable.
+        stem = Path(args[-1]).name
+        Path(option('-0')).write_bytes(gzip.compress(''.join(f'>{stem}/{i}\nACGT\n' for i in range(3)).encode()))
     elif args[0] == 'fasta':
         for line in Path(args[-1]).read_text().splitlines():
             if not line.startswith('@'):
                 print('>' + line.split('\t')[0] + '\nACGT')
+elif name == 'cd-hit-est':
+    # One input record per line pair (the module wrote plain FASTA). Record 0 is a singleton cluster,
+    # the rest one cluster represented by record 1, in real .clstr syntax so the module's split runs.
+    lines = Path(option('-i')).read_text().splitlines()
+    ids = [line[1:] for line in lines[::2]]
+    assert len(ids) != 1 and len(ids) != 2 and all(line.startswith('>') for line in lines[::2]), lines
+    members = ''.join(f'{n}\t4nt, >{i}... {"*" if n == 0 else "at +/100.00%"}\n' for n, i in enumerate(ids[1:]))
+    Path(option('-o')).write_text(''.join(f'>{i}\nACGT\n' for i in ids[:2]))  # empty input: empty outputs
+    Path(option('-o') + '.clstr').write_text(f'>Cluster 0\n0\t4nt, >{ids[0]}... *\n>Cluster 1\n{members}' if ids else '')
+    args = args + ['#reads'] + ids
+elif name == 'rattle':
+    inputs = option('-i').split(',')
+    assert all(gzip.open(f).read() if f.endswith('.gz') else Path(f).read_text() for f in inputs), inputs
+    if args[0] == 'cluster':
+        Path('clusters.out').touch()
+    elif args[0] == 'correct':
+        # Real layout: 4-line records whose header keeps the source format's > or @ plus cluster names.
+        Path('uncorrected.fq').write_text('>r0,gene_cluster_1,transcript_cluster_1\nACGT\n+\nKKKK\n'
+                                          '@r1 desc,gene_cluster_2,transcript_cluster_2\nACGT\n+\n@@@@\n')
+        Path('consensi.fq').write_text('@transcript_cluster_0 gene_cluster_0 reads=2\nACGT\n+\nKKKK\n')
+        Path('corrected.fq').touch()
+    elif args[0] == 'polish':
+        Path('transcriptome.fq').write_text('@transcript_cluster_0 gene_cluster_0 total_reads=2\nACGT\n+\nKKKK\n')
 elif name == 'fxsplit':
     # Real chunk names carry the --suffix (meta.id), so every chunk FASTA has a distinct staged name.
     Path('chunks').mkdir()
@@ -96,8 +126,8 @@ with tempfile.TemporaryDirectory(prefix="ark-isoseq-") as temporary:
     temporary = Path(temporary)
     binary = temporary / "bin"
     binary.mkdir()
-    for name in ("pbindex", "lima", "isoseq", "samtools", "fxsplit", "minimap2", "iso-cigar", "iso-align",
-                 "iso-segment", "iso-fusion"):
+    for name in ("pbindex", "lima", "isoseq", "samtools", "cd-hit-est", "rattle", "fxsplit", "minimap2", "iso-cigar",
+                 "iso-align", "iso-segment", "iso-fusion"):
         executable = binary / name
         executable.write_text(TOOLS)
         executable.chmod(0o755)
@@ -121,6 +151,7 @@ singularity.enabled = false
 conda.enabled = false
 params.aligner = 'mm2'
 params.cigar = false
+params.cluster_engine = 'isoseq'
 """)
     # The second pass runs only for the ark cases (--aligner ark); --cigar toggles cigar extension there.
     harness = temporary / "main.nf"
@@ -136,11 +167,11 @@ workflow {
             [[id: fastx.baseName, sample_id: fastx.name.replaceFirst(/(?:\\.(?:hq|singletons))?\\.fast[aq](?:\\.gz)?$/, ''),
               single_end: true, singleton: fastx.baseName.contains('singleton')], fastx]
         }
-        POOL_READS(reads, params.isoseq_cluster2_mode, 'pooled')
+        POOL_READS(reads, params.cluster_mode, 'pooled')
         reads = POOL_READS.out.reads
         POOL_READS.out.reads.view { meta, f -> 'POOL\\t' + meta.id + '\\t' + meta.sample_id + '\\t' + meta.singleton + '\\t' + f.size() }
     } else {
-        ISOSEQ(params.global_input_dir, params.global_primers, 1, params.isoseq_cluster2_mode,
+        ISOSEQ(params.global_input_dir, params.global_primers, 1, params.cluster_mode, params.cluster_engine,
             'pooled', params.entrypoint, params.entrypoint in ['refine', 'cluster'])
         reads = ISOSEQ.out.reads
     }
@@ -158,24 +189,39 @@ workflow {
     neb = ["NEB_5p--NEB_Clontech_3p", "NEB_5p--primer_3p"]
     # cigar None: mm2, second pass off. True/False: ark, second pass on, cigar extension on/off.
     # flnc honors the cluster mode through POOL_READS; "per_sample" only makes `expected` below the per-sample ids.
-    for entrypoint, mode, pairs, cigar in (
+    # Engine cases (5th field; default isoseq) start from mixed BAM + FASTQ inputs plus an empty FASTQ at cluster.
+    for entrypoint, mode, pairs, cigar, *engine in (
             ("refine", "per_sample", isoseqx, None), ("refine", "multi_sample", isoseqx, None),
             ("refine", "both", isoseqx, None), ("refine", "per_sample", isoseqx[:1], None),
             ("ccs", "per_sample", isoseqx[:1], None), ("ccs", "both", isoseqx, None),
             ("refine", "both", neb, None), ("ccs", "both", neb, None), ("cluster", "both", isoseqx, None),
             ("refine", "multi_sample", isoseqx, True), ("refine", "per_sample", isoseqx, True),
             ("flnc", "per_sample", isoseqx, True), ("flnc", "per_sample", isoseqx, False),
-            ("flnc", "multi_sample", isoseqx, True), ("flnc", "both", isoseqx, True)):
-        case = temporary / f"{entrypoint}-{mode}-{pairs[0]}-{len(pairs)}-{cigar}"
+            ("flnc", "multi_sample", isoseqx, True), ("flnc", "both", isoseqx, True),
+            ("cluster", "both", isoseqx, None, "cdhit"), ("cluster", "per_sample", isoseqx, None, "rattle"),
+            ("cluster", "multi_sample", isoseqx, None, "rattle"), ("refine", "both", isoseqx, None, "cdhit"),
+            ("refine", "multi_sample", isoseqx, None, "rattle")):
+        engine = engine[0] if engine else "isoseq"
+        case = temporary / f"{entrypoint}-{mode}-{pairs[0]}-{len(pairs)}-{cigar}-{engine}"
         inputs = case / "02_LIMA"
         inputs.mkdir(parents=True)
         samples = {f"movie.part.hifi.{pair}" for pair in pairs}
         files = {"refine": [f"movie.part.hifi_fl.{pair}.bam" for pair in pairs], "ccs": ["movie.part.hifi.bam"],
                  "cluster": [f"movie.part.hifi.{pair}_flnc.bam" for pair in pairs],
                  "flnc": [f"{sample}.{kind}.fasta.gz" for sample in samples for kind in ("hq", "singletons")]}
+        if entrypoint == "cluster" and engine != "isoseq":
+            # FASTQ first so the BAM has no .pbi: engines skip PBINDEX. The empty FASTQ yields no result.
+            files["cluster"] = [f"movie.part.hifi.{pairs[0]}.fastq.gz", f"movie.part.hifi.{pairs[1]}_flnc.bam",
+                                "zz_empty.fastq.gz"]
         file_bytes = {}
         for i, name in enumerate(files[entrypoint]):
-            if entrypoint == "flnc":
+            if name.endswith(".fastq.gz"):
+                stem = name.removesuffix(".fastq.gz")
+                reads = "" if "empty" in name else "".join(f"@{stem}/{n} desc\nACGT\n+\nIIII\n" for n in range(3))
+                (inputs / name).write_bytes(gzip.compress(reads.encode()))
+                if i == 0:
+                    (inputs / f"{name}.pbi").touch()
+            elif entrypoint == "flnc":
                 # Real gzipped records so pooled concatenation is byte-assertable below.
                 file_bytes[name] = gzip.compress(f">{name}\nACGT\n".encode())
                 (inputs / name).write_bytes(file_bytes[name])
@@ -191,10 +237,11 @@ workflow {
         calls = case / "calls.jsonl"
         environment.update(TEST_PRIMER_PAIRS=json.dumps(pairs), TEST_CALLS=str(calls))
         command = base + [str(harness), "--global_input_dir", str(inputs),
-                          "--global_output_dir", str(case / "results"), "--isoseq_cluster2_mode", mode,
+                          "--global_output_dir", str(case / "results"), "--cluster_mode", mode,
                           "--entrypoint", entrypoint]
         command += ["--global_primers", str(primers)] if entrypoint != "cluster" else []  # cluster needs none
         command += ["--aligner", "ark", "--cigar", str(cigar).lower()] if cigar is not None else []
+        command += ["--cluster_engine", engine]
         result = subprocess.run(command, cwd=case, env=environment, text=True, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=120)
         assert result.returncode == 0, result.stdout
@@ -230,9 +277,34 @@ workflow {
         refine = [args for name, args in records if name == "isoseq" and args[0] == "refine"]
         cluster = [args for name, args in records if name == "isoseq" and args[0] == "cluster2"]
         assert len(refine) == (len(pairs) if entrypoint in ("refine", "ccs") else 0), refine
-        assert len(cluster) == (len(expected) if entrypoint != "flnc" else 0), cluster
+        assert len(cluster) == (len(expected) if entrypoint != "flnc" and engine == "isoseq" else 0), cluster
         assert sum(name == "lima" for name, _ in records) == (entrypoint == "ccs")
-        assert sum(name == "pbindex" for name, _ in records) == (entrypoint in ("refine", "cluster") and len(pairs) > 1)
+        assert sum(name == "pbindex" for name, _ in records) == (
+            (entrypoint == "refine" or (entrypoint == "cluster" and engine == "isoseq")) and len(pairs) > 1)
+        to_fasta = [args for name, args in records if name == "samtools" and args[0] == "fasta" and "-0" in args]
+        bams = len(pairs) if entrypoint == "refine" else sum(f.endswith(".bam") for f in files[entrypoint])
+        # Converted once per BAM, also in 'both'; FASTQ inputs are never converted.
+        assert len(to_fasta) == (bams if engine != "isoseq" else 0), to_fasta
+        filled = (bams if entrypoint == "refine" else 2) if engine != "isoseq" else 0  # inputs holding reads
+        empty = int(entrypoint == "cluster" and engine != "isoseq")
+        if engine == "cdhit":
+            cdhit = {args[args.index("-o") + 1]: args[args.index("#reads") + 1:] for name, args in records
+                     if name == "cd-hit-est"}
+            # Every per-sample item (the empty one too) plus the pool, which merges all 3 reads of every input.
+            assert len(cdhit) == len(expected) + (empty if mode != "multi_sample" else 0), cdhit
+            assert len(cdhit["pooled.cdhit.fa"]) == 3 * filled, cdhit
+            assert gzip.decompress((case / "results/04_CDHIT_EST/pooled.singletons.fasta.gz").read_bytes()) == \
+                f">{cdhit['pooled.cdhit.fa'][0]}\nACGT\n".encode()
+            assert (case / "results/04_CDHIT_EST/pooled.cdhit.fa.clstr.gz").is_file()
+        if engine == "rattle":
+            rattle = [args for name, args in records if name == "rattle" and args[0] == "cluster"]
+            # Empty inputs are dropped in-task (RATTLE segfaults on them): no task for the empty sample alone.
+            assert len(rattle) == len(expected), rattle
+            pooled = [a[a.index("-i") + 1].split(",") for a in rattle if len(a[a.index("-i") + 1].split(",")) > 1]
+            assert [len(p) for p in pooled] == ([filled] if mode != "per_sample" else []), rattle
+            out = case / "results/04_RATTLE" / f"{sorted(expected)[0]}"
+            assert gzip.decompress(Path(f"{out}.hq.fasta.gz").read_bytes()) == b">transcript_cluster_0\nACGT\n"
+            assert gzip.decompress(Path(f"{out}.singletons.fasta.gz").read_bytes()) == b">r0\nACGT\n>r1\nACGT\n"
         assert not any(name == "samtools" and args[0] == "merge" for name, args in records), records
         # Every result id has one hq and one singleton chunk. With the second pass on, iso-align runs once per
         # chunk BAM with exactly the chunk FASTA minimap2 aligned it from (reads name -> SAM name).
@@ -243,7 +315,7 @@ workflow {
         assert len(chunks) == 2 * len(expected), chunks
         assert found == (sorted((sam + suffix, reads) for reads, sam in chunks.items()) if cigar is not None else []), (found, chunks)
         second_pass = "" if cigar is None else f", ark second pass, cigar extension {'on' if cigar else 'off'}"
-        print(f"PASS {entrypoint}: {mode}, {', '.join(pairs)}{second_pass}", flush=True)
+        print(f"PASS {entrypoint}: {mode}, {engine}, {', '.join(pairs)}{second_pass}", flush=True)
 
     # A checkpoint without a primer-pair (refine) or _flnc (cluster) suffix must fail before any tool runs.
     for start, bam, diagnostic in (("refine", "movie.part.hifi_fl.NEB_5p.bam", "Unexpected LIMA BAM name"),
@@ -263,6 +335,20 @@ workflow {
         assert not calls.exists(), calls.read_text()
     print("PASS malformed LIMA and refined filenames rejected before any tool runs", flush=True)
 
+    # Tag-less FASTA/FASTQ cannot go through isoseq cluster2 (the default engine).
+    case = temporary / "fastq-isoseq"
+    case.mkdir()
+    (case / "movie.fastq.gz").write_bytes(gzip.compress(b"@r\nACGT\n+\nIIII\n"))
+    calls = case / "calls.jsonl"
+    environment.update(TEST_CALLS=str(calls))
+    result = subprocess.run(base + [str(harness), "--entrypoint", "cluster", "--global_input_dir", str(case),
+                                   "--global_output_dir", str(case / "results")],
+                            cwd=case, env=environment, text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, timeout=120)
+    assert result.returncode != 0 and "use --cluster_engine cdhit or rattle" in result.stdout, result.stdout
+    assert not calls.exists(), calls.read_text()
+    print("PASS FASTQ input rejected for the isoseq engine", flush=True)
+
     # Exercise the actual CLI validator: refine needs primers, cluster does not, unknown entrypoints fail.
     for start, diagnostic in (("refine", "missing required --global_primers"),
                               ("cluster", "Parameter validation failed"),
@@ -273,3 +359,11 @@ workflow {
         assert result.returncode != 0 and diagnostic in result.stdout, result.stdout
         assert ("missing required --global_primers" in result.stdout) == (start == "refine"), result.stdout
     print("PASS --entrypoint validation and missing primers", flush=True)
+
+    for flag, value, diagnostic in (("--cluster_engine", "foo", "Unknown cluster_engine option"),
+                                    ("--isoseq_cluster2_mode", "both", "isoseq_cluster2_mode was renamed to cluster_mode")):
+        result = subprocess.run(base + [str(ROOT / "src/main.nf"), "--entrypoint", "cluster", flag, value],
+                                cwd=temporary, env=environment, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=120)
+        assert result.returncode != 0 and diagnostic in result.stdout, result.stdout
+    print("PASS --cluster_engine validation and isoseq_cluster2_mode rename", flush=True)
