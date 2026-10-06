@@ -5,7 +5,9 @@ Usage: python3 assets/ci/test_isoseq.py [path/to/nextflow]
 """
 
 import json
+import gzip
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -124,14 +126,19 @@ params.cigar = false
     harness = temporary / "main.nf"
     harness.write_text("""
 include { ISOSEQ } from 'REPO/src/subworkflows/isoseq/main.nf'
+include { POOL_READS } from 'REPO/src/subworkflows/pool_reads/main.nf'
 include { SPLIT_ALIGN_CLEAN_CHUNKS } from 'REPO/src/subworkflows/split_align/main.nf'
 workflow {
     if (params.entrypoint == 'flnc') {
-        // Same read channel as src/subworkflows/preprocessing/main.nf builds for flnc.
+        // Same read channel as src/subworkflows/preprocessing/main.nf builds for flnc,
+        // routed through POOL_READS like the real pipeline so modes are honored here too.
         reads = Channel.fromPath("${params.global_input_dir}/*.fast*", checkIfExists: true).map { fastx ->
             [[id: fastx.baseName, sample_id: fastx.name.replaceFirst(/(?:\\.(?:hq|singletons))?\\.fast[aq](?:\\.gz)?$/, ''),
               single_end: true, singleton: fastx.baseName.contains('singleton')], fastx]
         }
+        POOL_READS(reads, params.isoseq_cluster2_mode, 'pooled')
+        reads = POOL_READS.out.reads
+        POOL_READS.out.reads.view { meta, f -> 'POOL\\t' + meta.id + '\\t' + meta.sample_id + '\\t' + meta.singleton + '\\t' + f.size() }
     } else {
         ISOSEQ(params.global_input_dir, params.global_primers, 1, params.isoseq_cluster2_mode,
             'pooled', params.entrypoint, params.entrypoint in ['refine', 'cluster'])
@@ -150,14 +157,15 @@ workflow {
     isoseqx = [f"IsoSeqX_bc{i:02}_5p--IsoSeqX_3p" for i in (1, 2)]
     neb = ["NEB_5p--NEB_Clontech_3p", "NEB_5p--primer_3p"]
     # cigar None: mm2, second pass off. True/False: ark, second pass on, cigar extension on/off.
-    # flnc ignores the cluster mode; "per_sample" only makes `expected` below the per-sample ids.
+    # flnc honors the cluster mode through POOL_READS; "per_sample" only makes `expected` below the per-sample ids.
     for entrypoint, mode, pairs, cigar in (
             ("refine", "per_sample", isoseqx, None), ("refine", "multi_sample", isoseqx, None),
             ("refine", "both", isoseqx, None), ("refine", "per_sample", isoseqx[:1], None),
             ("ccs", "per_sample", isoseqx[:1], None), ("ccs", "both", isoseqx, None),
             ("refine", "both", neb, None), ("ccs", "both", neb, None), ("cluster", "both", isoseqx, None),
             ("refine", "multi_sample", isoseqx, True), ("refine", "per_sample", isoseqx, True),
-            ("flnc", "per_sample", isoseqx, True), ("flnc", "per_sample", isoseqx, False)):
+            ("flnc", "per_sample", isoseqx, True), ("flnc", "per_sample", isoseqx, False),
+            ("flnc", "multi_sample", isoseqx, True), ("flnc", "both", isoseqx, True)):
         case = temporary / f"{entrypoint}-{mode}-{pairs[0]}-{len(pairs)}-{cigar}"
         inputs = case / "02_LIMA"
         inputs.mkdir(parents=True)
@@ -165,10 +173,16 @@ workflow {
         files = {"refine": [f"movie.part.hifi_fl.{pair}.bam" for pair in pairs], "ccs": ["movie.part.hifi.bam"],
                  "cluster": [f"movie.part.hifi.{pair}_flnc.bam" for pair in pairs],
                  "flnc": [f"{sample}.{kind}.fasta.gz" for sample in samples for kind in ("hq", "singletons")]}
+        file_bytes = {}
         for i, name in enumerate(files[entrypoint]):
-            (inputs / name).touch()
-            if i == 0 and entrypoint != "flnc":
-                (inputs / f"{name}.pbi").touch()
+            if entrypoint == "flnc":
+                # Real gzipped records so pooled concatenation is byte-assertable below.
+                file_bytes[name] = gzip.compress(f">{name}\nACGT\n".encode())
+                (inputs / name).write_bytes(file_bytes[name])
+            else:
+                (inputs / name).touch()
+                if i == 0:
+                    (inputs / f"{name}.pbi").touch()
         (inputs / "ignored.consensusreadset.xml").touch()
         (inputs / "ignored.lima.report").touch()
         primers = case / "primers.fasta"
@@ -187,6 +201,31 @@ workflow {
         actual = {line.split("\t")[1] for line in result.stdout.splitlines() if line.startswith("RESULT\t")}
         expected = (samples if mode != "multi_sample" else set()) | ({"pooled"} if mode != "per_sample" else set())
         assert actual == expected, (actual, expected, result.stdout)
+        if entrypoint == "flnc":
+            # Pooled items carry sample_id 'pooled' with ids distinct from per-sample ones;
+            # pooled bytes are exactly the member files concatenated in sorted-name order.
+            pools = [line.split("\t")[1:] for line in result.stdout.splitlines() if line.startswith("POOL\t")]
+            by_id = {pid: (sample, singleton == "true", int(size)) for pid, sample, singleton, size in pools}
+            members = {}
+            for name in files["flnc"]:
+                kind = "singletons" if ".singletons." in name else "hq"
+                members.setdefault(kind, []).append(name)
+                if mode != "multi_sample":
+                    per_sample_id = name.removesuffix(".gz")
+                    sample = re.sub(r"(?:\.(?:hq|singletons))?\.fast[aq](?:\.gz)?$", "", name)
+                    assert by_id.get(per_sample_id) == (sample, kind == "singletons", len(file_bytes[name])), (by_id, name)
+            pooled_ids = {"pooled.pooled", "pooled.pooled.singletons"}
+            if mode == "per_sample":
+                assert not (set(by_id) & pooled_ids), by_id
+            else:
+                for kind, cls in (("hq", ""), ("singletons", ".singletons")):
+                    pid = f"pooled.pooled{cls}"
+                    want = b"".join(file_bytes[n] for n in sorted(members[kind]))
+                    assert by_id.get(pid) == ("pooled", kind == "singletons", len(want)), (by_id, pid)
+                    hits = [p for p in case.rglob(f"{pid}.fasta.gz")]
+                    assert hits, (pid, mode)
+                    for path in hits:
+                        assert gzip.decompress(path.read_bytes()) == gzip.decompress(want), (path, mode)
         records = [json.loads(line) for line in calls.read_text().splitlines()]
         refine = [args for name, args in records if name == "isoseq" and args[0] == "refine"]
         cluster = [args for name, args in records if name == "isoseq" and args[0] == "cluster2"]

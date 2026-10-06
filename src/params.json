@@ -11,7 +11,7 @@
     "global_prefix": "",
     "global_species_name": "",
 
-    "// 2)": "CCS / Isoseq cluster options [ clustering: per_sample, multi_sample, both ] ─────",
+    "// 2)": "CCS / Isoseq cluster options [ clustering: per_sample, multi_sample, both; flnc pools inputs the same way ] ─────",
     "ccs_chunk": 1000,
     "skera_is_kinnex_library": false,
     "isoseq_cluster2_mode": "multi_sample",

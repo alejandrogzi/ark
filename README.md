@@ -114,6 +114,13 @@ Their tissue names depend on your experimental barcode assignments; the pipeline
 does not infer them. Each input BAM/primer pair is treated as a separate sample,
 including when files come from different sequencing runs.
 
+For `flnc`, the same three modes pool input FASTA/FASTQ files instead of
+clustering: `per_sample` aligns each file separately; `multi_sample`
+concatenates all files per hq/singleton class into one pooled sample named
+`global_prefix`, so adapter removal, segmentation, and twin-collapsing see
+all samples together per chromosome; `both` produces both sets. Do not name
+an input sample `global_prefix`: its reads would merge with the pool.
+
 A helper sh script is provided to run the pipeline on a SLURM cluster. See details below.
 
 <details>

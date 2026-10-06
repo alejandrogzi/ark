@@ -55,6 +55,10 @@
 
 # Changelog
 
+## [Unreleased]
+
+- `flnc` entrypoint honors `isoseq_cluster2_mode`: `multi_sample`/`both` concatenate all input reads per hq/singleton class into one pooled sample named `global_prefix` (new `FASTX_CONCAT` module + `POOL_READS` subworkflow), so adapter removal, polyA segmentation, and twin-collapsing see all samples together per chromosome instead of running per sample. `multi_sample` flnc outputs move from per-sample names to `global_prefix`; do not name an input sample `global_prefix`.
+
 ## [v2.0.27] - 2026-10-02
 
 This release rolls up everything since v2.0.26 (PRs #43-#47 plus direct fixes) alongside new work on this branch: it fixes a dead second pass (fragment detection never ran for any current entrypoint), adds `refine` and `cluster` restart checkpoints, wires the iso-classify intron track end to end, and implements xORF database merging through `custom_database`. The trackDb template is now generated inline instead of read from disk, the genome-browser upload wiring is corrected, resume after alignment works again, and a full end-to-end CI suite guards the pipeline. CI gold has to be regenerated (see below).
