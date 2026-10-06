@@ -2,7 +2,7 @@
     "entrypoint": "flnc",
     "ccs_chunk": 100,
     "skera_is_kinnex_library": false,
-    "isoseq_cluster2_mode": "multi_sample",
+    "cluster_mode": "multi_sample",
     "fxsplit_chunk_size": 50000,
     "aligner": "ark",
     "minimap2_align_use_junc_bed": true,
