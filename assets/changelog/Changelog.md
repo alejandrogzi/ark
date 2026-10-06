@@ -55,7 +55,7 @@
 
 # Changelog
 
-## [Unreleased]
+## [v2.0.28] - 2026-10-07
 
 - `FXSPLIT` no longer swallows every failure: only its benign empty-input exit code (1, "No FASTA records found", no chunks — probed against the real image) is ignored. Anything else follows the global ladder — retry resource codes (including 137 OOM-kill, with memory scaling per attempt), fail fast otherwise — so a killed split aborts the run instead of silently starving alignment, segmentation, and collapse of chunks. Covered by a new `test_fxsplit.py` harness (exit 1 completes chunkless, exit 137 fails loudly), run in CI.
 - `flnc` entrypoint honors `isoseq_cluster2_mode`: `multi_sample`/`both` concatenate all input reads per hq/singleton class into one pooled sample named `global_prefix` (new `FASTX_CONCAT` module + `POOL_READS` subworkflow), so adapter removal, polyA segmentation, and twin-collapsing see all samples together per chromosome instead of running per sample. `multi_sample` flnc outputs move from per-sample names to `global_prefix`; do not name an input sample `global_prefix`.
