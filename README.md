@@ -105,7 +105,7 @@ name is kept as the sample ID, so a full run's
 `movie.IsoSeqX_bc01_5p--IsoSeqX_3p_flnc.bam` stays
 `movie.IsoSeqX_bc01_5p--IsoSeqX_3p`.
 
-`isoseq_cluster2_mode` controls clustering of those refined reads: `per_sample`
+`cluster_mode` controls clustering of those refined reads: `per_sample`
 keeps each input primer-pair group separate; `multi_sample` clusters all groups
 together under `global_prefix`; `both` produces both sets using the same refined
 reads. Sample IDs retain the full primer pair, for example
@@ -113,6 +113,20 @@ reads. Sample IDs retain the full primer pair, for example
 Their tissue names depend on your experimental barcode assignments; the pipeline
 does not infer them. Each input BAM/primer pair is treated as a separate sample,
 including when files come from different sequencing runs.
+
+`cluster_engine` picks the clustering tool: `isoseq` (default, `isoseq cluster2`;
+needs tagged PacBio BAMs), `cdhit` (`cd-hit-est`, identity `cdhit_identity`,
+default 0.99) or `rattle` (RATTLE cluster/correct/polish at isoform level). Both
+alternatives work from any entrypoint. With them, `cluster` also reads
+`*.fasta[.gz]` / `*.fastq[.gz]`, for example SRA reads that lost their PacBio
+tags. Each file is one sample, named after the file without `.fast[aq](.gz)`.
+BAMs are converted to FASTA once; FASTA/FASTQ inputs are used as they are.
+Either way, hq holds the cluster representatives (cd-hit) or the polished
+consensi (RATTLE), and singletons holds the one-read clusters. Outputs go to
+`04_CDHIT_EST` / `04_RATTLE`; cd-hit also writes the read-to-cluster `.clstr`.
+`cluster_mode` applies unchanged; the pooled run takes every sample's file at
+once. An old `isoseq_cluster2_mode` setting is rejected: it is now
+`cluster_mode`.
 
 For `flnc`, the same three modes pool input FASTA/FASTQ files instead of
 clustering: `per_sample` aligns each file separately; `multi_sample`

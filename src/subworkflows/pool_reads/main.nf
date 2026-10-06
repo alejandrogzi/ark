@@ -29,7 +29,7 @@ workflow POOL_READS {
       if (mode in ['multi_sample', 'both']) {
           if (!prefix) {
               error """
-              ERROR: pooling flnc reads needs --global_prefix (empty with isoseq_cluster2_mode '${mode}')
+              ERROR: pooling flnc reads needs --global_prefix (empty with cluster_mode '${mode}')
               """.stripIndent()
           }
 
