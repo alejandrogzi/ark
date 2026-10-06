@@ -32,6 +32,10 @@ jobs:
         if: matrix.entrypoint == 'subreads'
         run: python3 assets/ci/test_isoseq.py
 
+      - name: Check FXSPLIT failure handling
+        if: matrix.entrypoint == 'subreads'
+        run: python3 assets/ci/test_fxsplit.py
+
       - name: Run pipeline
         env:
           D: "${{ github.workspace }}/assets/test_data/data"
