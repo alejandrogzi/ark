@@ -5,6 +5,7 @@
 */
 
 include { ISOSEQ } from '../isoseq/main.nf'
+include { POOL_READS } from '../pool_reads/main.nf'
 include { GENOME } from '../genome/main.nf'
 
 include { GXF2BED } from '../../modules/custom/gxf2bed/main.nf'
@@ -335,6 +336,9 @@ workflow PREPROCESSING {
           // INFO: flnc: FASTA/FASTQ files from global_input_dir, no Iso-Seq steps. meta.id = file baseName;
           // INFO: sample_id = name minus .hq/.singletons and .fast[aq](.gz), so X.hq + X.singletons are one sample X
           // INFO: singleton = name contains "singleton"
+          // INFO: pooling mirrors the Iso-Seq entrypoints (pool at cluster2): multi_sample/both concatenate
+          // INFO: every input file per hq/singleton class into one pooled sample named global_prefix, so
+          // INFO: adapters/segmentation/collapse see all samples together per chromosome downstream
           Channel
               .fromPath("${global_input_dir}/*.fast*", checkIfExists: true)
               .map { fastx ->
@@ -349,7 +353,15 @@ workflow PREPROCESSING {
                       fastx,
                   ]
               }
-              .set { ch_reads }
+              .set { ch_flnc_reads }
+
+          POOL_READS(
+              ch_flnc_reads,
+              isoseq_cluster2_mode,
+              global_prefix
+          )
+          ch_reads = ch_reads.mix(POOL_READS.out.reads)
+          ch_versions = ch_versions.mix(POOL_READS.out.versions)
       }
       
       ch_versions = ch_versions.mix(ch_genome.versions)
