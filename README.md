@@ -114,26 +114,39 @@ Their tissue names depend on your experimental barcode assignments; the pipeline
 does not infer them. Each input BAM/primer pair is treated as a separate sample,
 including when files come from different sequencing runs.
 
-`cluster_engine` picks the clustering tool: `isoseq` (default, `isoseq cluster2`;
-needs tagged PacBio BAMs), `cdhit` (`cd-hit-est`, identity `cdhit_identity`,
-default 0.99) or `rattle` (RATTLE cluster/correct/polish at isoform level). Both
-alternatives work from any entrypoint. With them, `cluster` also reads
-`*.fasta[.gz]` / `*.fastq[.gz]`, for example SRA reads that lost their PacBio
-tags. Each file is one sample, named after the file without `.fast[aq](.gz)`.
-BAMs are converted to FASTA once; FASTA/FASTQ inputs are used as they are.
-Either way, hq holds the cluster representatives (cd-hit) or the polished
-consensi (RATTLE), and singletons holds the one-read clusters. Outputs go to
-`04_CDHIT_EST` / `04_RATTLE`; cd-hit also writes the read-to-cluster `.clstr`.
-`cluster_mode` applies unchanged; the pooled run takes every sample's file at
-once. An old `isoseq_cluster2_mode` setting is rejected: it is now
-`cluster_mode`.
+`cluster_engine` decides whether refined reads are clustered before alignment: `none`
+(default) aligns them directly, as PacBio's current Kinnex workflow does, and
+transcript models are built after alignment; `isoseq` (legacy) runs
+`isoseq cluster2` first and needs tagged PacBio BAMs. The `cluster` entrypoint
+reads `*_flnc.bam` only.
 
-For `flnc`, the same three modes pool input FASTA/FASTQ files instead of
-clustering: `per_sample` aligns each file separately; `multi_sample`
-concatenates all files per hq/singleton class into one pooled sample named
-`global_prefix`, so adapter removal, segmentation, and twin-collapsing see
-all samples together per chromosome; `both` produces both sets. Do not name
-an input sample `global_prefix`: its reads would merge with the pool.
+For `flnc`, put FASTA/FASTQ files (`.fasta`/`.fastq`, optionally `.gz`) in
+`global_input_dir`. Public SRA/ENA runs come in every processing state, so
+`iso-fastx inspect` classifies each file from its first reads and routes it:
+
+| State | Looks like | What happens |
+|---|---|---|
+| `ccs` | primers at the read ends, both orientations | `lima --isoseq` orients and clips (kit detected, or `global_primers`) |
+| `mixed` | primer-free, some reads start with polyT | `iso-fastx orient` flips the reversed reads |
+| `fl` / `flnc` | primer-free, oriented, with or without polyA | used as is |
+| `clustered` | `transcript/N`, `PB.x.y` names | used as is; every distinct chain is kept |
+| `subreads`, `ambiguous` | raw subreads, partial primers, long arrays | the run stops and says why |
+
+`--flnc_input_state` forces one state for all files (`ccs` then needs
+`--global_primers`). `cluster_mode` applies as before: `per_sample` aligns each
+file separately; `multi_sample` concatenates all files per hq/singleton class
+into one pooled sample named `global_prefix`; `both` produces both sets. Do not
+name an input sample `global_prefix`: its reads would merge with the pool.
+
+After polyA segmentation and fusion detection, `reconstruct_engine chain`
+(default) collapses the reads of each sample and chromosome into transcript
+models by intron chain (`collapse chain`). Only models reach ORF prediction;
+each keeps a real read as its representative and carries its support as
+`#CN<n>`. `reconstruct_preset` sets how much evidence a novel model needs:
+`sensitive` only removes redundancy (every distinct chain is kept), `balanced`
+(default) needs 2 molecules per novel chain, `strict` 3. Every read ends up in
+a model or in `07B_RECONSTRUCT/chain/<sample>/*.excluded.bed` with its reason.
+`reconstruct_engine none` restores per-read ORF calling.
 
 A helper sh script is provided to run the pipeline on a SLURM cluster. See details below.
 
