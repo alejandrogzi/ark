@@ -5,7 +5,7 @@
 */
 
 include { ISOSEQ } from '../isoseq/main.nf'
-include { POOL_READS } from '../pool_reads/main.nf'
+include { FASTX_PREPARE } from '../fastx/main.nf'
 include { GENOME } from '../genome/main.nf'
 
 include { GXF2BED } from '../../modules/custom/gxf2bed/main.nf'
@@ -44,7 +44,8 @@ workflow PREPROCESSING {
       annotation             // path
       ccs_chunk              // int
       cluster_mode           // string [ per_sample, multi_sample, both ]
-      cluster_engine         // string [ isoseq, cdhit, rattle ]
+      cluster_engine         // string [ none, isoseq ]
+      flnc_input_state       // string [ auto, ccs, fl, flnc, mixed, clustered ]
       protein_database       // path
       custom_database        // path
       raw_database           // path
@@ -318,8 +319,8 @@ workflow PREPROCESSING {
       */
 
       // INFO: every entrypoint ends here with ch_reads = [ meta, reads FASTA/FASTQ ] for SPLIT_ALIGN
-      // INFO: Iso-Seq entrypoints: BAMs -> ISOSEQ (CCS/LIMA/refine/cluster2 from the stage the entrypoint names);
-      // INFO: cluster_engine cdhit/rattle replaces cluster2, and its cluster entrypoint also takes FASTA/FASTQ
+      // INFO: Iso-Seq entrypoints: BAMs -> ISOSEQ (CCS/LIMA/refine, then cluster2 only with cluster_engine isoseq);
+      // INFO: flnc: FASTA/FASTQ -> FASTX_PREPARE (state per file, lima/orient where needed, pooling)
       ch_reads = Channel.empty()
       if (entrypoint in ['subreads', 'ccs', 'refine', 'cluster']) {
           ISOSEQ(
@@ -336,35 +337,17 @@ workflow PREPROCESSING {
           ch_reads = ch_reads.mix(ISOSEQ.out.reads)
           ch_versions = ch_versions.mix(ISOSEQ.out.versions)
       } else if (entrypoint == "flnc") {
-          // INFO: flnc: FASTA/FASTQ files from global_input_dir, no Iso-Seq steps. meta.id = file baseName;
-          // INFO: sample_id = name minus .hq/.singletons and .fast[aq](.gz), so X.hq + X.singletons are one sample X
-          // INFO: singleton = name contains "singleton"
-          // INFO: pooling mirrors the Iso-Seq entrypoints (pool at cluster2): multi_sample/both concatenate
-          // INFO: every input file per hq/singleton class into one pooled sample named global_prefix, so
-          // INFO: adapters/segmentation/collapse see all samples together per chromosome downstream
-          Channel
-              .fromPath("${global_input_dir}/*.fast*", checkIfExists: true)
-              .map { fastx ->
-                  def singleton = fastx.baseName.contains("singleton")
-                  return [
-                      [
-                          id:         fastx.baseName,
-                          sample_id:  fastx.name.replaceFirst(/(?:\.(?:hq|singletons))?\.fast[aq](?:\.gz)?$/, ''),
-                          single_end: true,
-                          singleton:  singleton
-                      ],
-                      fastx,
-                  ]
-              }
-              .set { ch_flnc_reads }
-
-          POOL_READS(
-              ch_flnc_reads,
+          // INFO: pooling mirrors the Iso-Seq entrypoints: multi_sample/both concatenate every input file
+          // INFO: per hq/singleton class into one pooled sample named global_prefix
+          FASTX_PREPARE(
+              global_input_dir,
+              global_primers,
+              flnc_input_state,
               cluster_mode,
               global_prefix
           )
-          ch_reads = ch_reads.mix(POOL_READS.out.reads)
-          ch_versions = ch_versions.mix(POOL_READS.out.versions)
+          ch_reads = ch_reads.mix(FASTX_PREPARE.out.reads)
+          ch_versions = ch_versions.mix(FASTX_PREPARE.out.versions)
       }
       
       ch_versions = ch_versions.mix(ch_genome.versions)

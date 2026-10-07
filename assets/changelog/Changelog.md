@@ -55,6 +55,82 @@
 
 # Changelog
 
+## [v2.1.0] - 2026-10-07
+
+BREAKING release. Transcript models, not individual reads, now reach ORF prediction. Refined reads are no longer clustered before alignment. Every FASTA/FASTQ input is classified and cleaned before alignment. Design, evidence and pilot plan: `PLAN.md` and `reports/2026-10-07_isoseq_fastq_reconstruction_review.md`.
+
+### BREAKING: `reconstruct_engine chain` (default) collapses reads into transcript models before ORF prediction
+
+- New `RECONSTRUCT` subworkflow (`src/subworkflows/reconstruct/main.nf`) runs after polyA segmentation and fusion detection.
+  - The fusion detector still reads reads: its recover rule is a read ratio.
+  - Its free and fusion outputs are each collapsed per `[sample_id, chr]` by the new `CHAIN_COLLAPSE` module (`collapse chain`, collapse crate 0.1.0). Only the models go to xORF.
+- **Models:** each model is a real read line (iso-segment tags intact) with its support appended as `#CN<n>`; `#SG` now means a one-read model.
+- **`collapse chain`** (`assets/rust/collapse/src/chain.rs`) works per strand.
+  - **Splice sites:** an unannotated site within 5 bp of an annotated site, or of one with 5× its reads, moves to it. Annotated sites, and sites holding ≥ 20% of their window, never move.
+  - **Chains and molecules:** reads are grouped by intron chain. Reads with identical ends count as one molecule (PCR twins).
+  - **Truncated copies:** 5′- and tailless 3′-truncated copies are absorbed into the best-supported compatible parent. Tight TSS clusters (≥ 10 starts within 50 nt) and annotated starts are protected.
+  - **Mono-exonic reads:** absorbed when inside a model's exon, excluded when intronic, clustered otherwise.
+  - **Support:** a known chain needs 1 molecule, a novel chain 2 (`balanced`). When ≥ 70% of reads carry a polyA tail, a novel chain also needs one tailed read. Novel models must fall within the first 99% of their locus reads, ranked by support (loci = models sharing exonic bp).
+  - **Ends:** the 3′ end is the mode of tailed 3′ ends (the median when no end repeats). The 5′ end is the most upstream after trimming the outer 10%.
+  - **Outputs:** `models.bed`, `support.tsv`, `members.tsv.gz`, `excluded.bed` (reason in column 13) and `counts.tsv`.
+  - **Speed:** about 3.9 M reads in 5 s and 1.2 GB on a laptop.
+- **Outputs:** every read is accounted for, either in a model's member list or in `07B_RECONSTRUCT/chain/<sample>/*.excluded.bed` with its reason.
+- **Presets:** `reconstruct_preset` picks `sensitive` (only removes redundancy, keeps every distinct chain), `balanced` (default) or `strict`. `reconstruct_min_support_novel`, `reconstruct_min_support_mono`, `reconstruct_min_read_fraction` and `reconstruct_junction_wobble` override a preset. Clustered inputs always run `sensitive`.
+- **Intron classification** counts reads (`seen / spanned`), so `PREPOLISH` now takes the uncollapsed free reads (new `evidence` emit of `SPLIT_ALIGN_CLEAN_CHUNKS`), re-keyed to the xORF ids. The POLISH join keys are plain strings now; xORF builds GString ids.
+- **`collapse_shrink_twins`** is ignored with a reconstruction engine (warning). `reconstruct_engine none` restores per-read ORF calling and warns.
+- **IsoQuant/isocall:** `isoquant` and `isocall` are reserved engine names. Validation rejects them ("not implemented in v2.1.0"). `RECONSTRUCT` documents the contract a future engine has to meet.
+
+### BREAKING: `cluster_engine none` is the default; `cdhit` and `rattle` are removed
+
+- **`none`:** refined (FLNC) BAMs become FASTA once (`SAMTOOLS_FASTA`) and pool through `POOL_READS` like `flnc` inputs. This is the order of PacBio's current Kinnex workflow: FLNC → align → call.
+- **`isoseq`** (cluster2) remains selectable but is no longer used by default. Its output is marked `clustered`.
+- **Removed:**
+  - the `CDHIT_EST` and `RATTLE` modules, their config and `cdhit_identity`;
+  - their CI cases.
+
+  Passing `cluster_engine cdhit|rattle` or `cdhit_identity` fails validation.
+- **`--entrypoint cluster`** reads `*_flnc.bam` only again. FASTA/FASTQ go to `flnc`.
+
+### FASTA/FASTQ inputs are classified and normalized per file (`FASTX_PREPARE`)
+
+- **New `FASTX_PREPARE` subworkflow:** `iso-fastx inspect` (isotools v0.0.45) classifies every `flnc` file from its first reads, and the file is routed by state:
+
+  | State | What happens |
+  |---|---|
+  | `ccs` (primers, both orientations) | `LIMA_FASTX` (`lima --isoseq --peek-guess`, FASTQ in and out); the per-pair outputs are joined per input |
+  | `mixed` (primer-free, partly reversed) | `FASTX_ORIENT` (`iso-fastx orient`) flips reads that start with polyT |
+  | `fl` / `flnc` | used as is |
+  | `clustered` | used as is, with the `sensitive` preset |
+  | `empty` | skipped with a warning |
+  | `subreads` / `ambiguous` | the run stops with the measured numbers and a hint |
+
+- **Primers:** `global_primers` when given, else the detected kit picks a bundled set: `assets/primers/isoseqx.fasta` (official `IsoSeq_v2_primers_12.fasta`) or `assets/primers/express.fasta` (NEB/Clontech).
+- **`flnc_input_state`** forces one state. `ccs` then needs `--global_primers`.
+- **Why:** ARK aligns with `minimap2 -uf` and takes the strand from the alignment flag, which assumes oriented reads. Raw-CCS SRA FASTQ is about 50/50 forward/reverse.
+- **`isotools_adapter_remove_adapters` now defaults to `false`.** Inputs are cleaned before alignment; the module stays available.
+
+### Read-count-aware polishing
+
+- iso-orphan, iso-utr and iso-pas (isotools v0.0.45) weight records by `#CN`, so their support thresholds and ratios mean the same on models as on reads. Untagged reads weigh 1.
+
+### Images
+
+- `isotools` modules use `ghcr.io/alejandrogzi/isotools:v0.0.45`. `isox-rs` and `isox-py` modules use `:v2.1.0` instead of `:latest`. Publish both tags before running v2.1.0.
+
+### Chores
+
+- Collapse crate 0.1.0. `test_binkey_to_bytes` expected 31 bytes and already failed on v2.0.28; it now expects 39.
+- isotools v0.0.45 brings `iso-fastx`, the NEB/IsoSeqX 5′ primers in iso-adapter's database, and `#CN` weights; see its changelog.
+
+### CI
+
+- `assets/ci/test_isoseq.py`:
+  - drops the cd-hit/RATTLE cases;
+  - adds `cluster_engine none` cases and asserts one `collapse chain` call per result group with the right preset;
+  - adds a `flnc` routing case (ccs → lima, mixed → orient, clustered → sensitive) and a subreads rejection;
+  - adds validator checks for the removed engines and the reserved reconstruction engines.
+- The containerized gold has to be regenerated from a real run once the images are published.
+
 ## [v2.0.28] - 2026-10-07
 
 - New `cluster_engine` (`isoseq` default | `cdhit` | `rattle`) de-duplicates reads without PacBio tags (e.g. SRA IsoSeq FASTQs), which `isoseq cluster2` cannot use. The `cluster` entrypoint now also reads `*.fasta[.gz]` / `*.fastq[.gz]` (rejected with a hint under `isoseq`), and every Iso-Seq entrypoint can use the new engines. Neither tool reads BAM, so BAMs pass once through the new `SAMTOOLS_FASTA` (FASTA, because neither tool uses qualities: RATTLE's consensi are identical from FASTA and FASTQ). FASTA/FASTQ inputs are never converted. `multi_sample` pools without a separate merge: RATTLE takes every file in one `-i a,b,c`, and `CDHIT_EST` streams them into the one plain FASTA that `cd-hit-est` needs anyway. Both emit the `BAM_TO_FA` contract (`<id>.{hq,singletons}.fasta.gz` + `meta.singleton`), so alignment onward is untouched. cd-hit: one-member clusters are singletons and the other representatives are hq (`-c cdhit_identity -n 10 -d 0`, `.clstr.gz` published). RATTLE: `cluster --iso` → `correct -r 1` → `polish`; `transcriptome.fq` is hq and `uncorrected.fq` (clusters of one read) is singletons. Empty inputs are dropped before RATTLE, which segfaults on them. PBINDEX is skipped for `cluster` BAMs bound for the new engines. Default `isoseq` behaviour is unchanged. Covered by new `test_isoseq.py` cases and verified against the real containers on synthetic reads with planted cluster sizes.

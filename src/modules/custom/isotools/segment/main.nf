@@ -5,7 +5,7 @@ process ISOTOOLS_SEGMENT {
     conda "${moduleDir}/environment.yml"
     container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
         '' :
-        'ghcr.io/alejandrogzi/isotools:latest' }"
+        'ghcr.io/alejandrogzi/isotools:v0.0.45' }"
 
     input:
     tuple val(meta), path(bam), path(bai)

@@ -14,7 +14,7 @@ include { FASTX_CONCAT } from '../../modules/custom/fastx/concat/main.nf'
 
 workflow POOL_READS {
     take:
-      ch_reads  // [ meta, fastx ]; meta carries sample_id + singleton (flnc file channeling)
+      ch_reads  // [ meta, fastx ]; meta carries sample_id + singleton (+ clustered) (flnc file channeling)
       mode      // string [ per_sample, multi_sample, both ]
       prefix    // string (global_prefix: sample_id of the pooled branch)
 
@@ -36,10 +36,11 @@ workflow POOL_READS {
           // INFO: one pooled file per hq/singleton class; singleton flag survives so SEGMENT
           // INFO: still gets --singleton on the right reads. Sorted here for deterministic
           // INFO: meta/error output; FASTX_CONCAT re-sorts in-task (channel order is not a guarantee).
+          // INFO: a pool holding any clustered file is clustered (collapse chain keeps every chain)
           ch_reads
-              .map { meta, fastx -> [ meta.singleton, fastx ] }
+              .map { meta, fastx -> [ meta.singleton, fastx, meta.clustered ?: false ] }
               .groupTuple(by: 0)
-              .map { singleton, files ->
+              .map { singleton, files, clustered ->
                   def sorted = files.sort { a, b -> a.name <=> b.name }
                   def exts = sorted.collect { f ->
                       def m = (f.name =~ /(\.fast[aq])(\.gz)?$/)
@@ -62,6 +63,7 @@ workflow POOL_READS {
                       sample_id:  prefix,
                       single_end: true,
                       singleton:  singleton,
+                      clustered:  clustered.any(),
                       outfile:    "${id}${exts[0]}"
                   ]
                   [ meta, sorted ]

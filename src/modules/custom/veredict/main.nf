@@ -5,7 +5,7 @@ process VEREDICT {
     conda "${moduleDir}/environment.yml"
     container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
         '':
-        'ghcr.io/alejandrogzi/isox-py:latest' }"
+        'ghcr.io/alejandrogzi/isox-py:v2.1.0' }"
 
     input:
     tuple val(meta), path(bed), path(_), path(orfs), path(retentions), path(intraprimming), path(truncations)

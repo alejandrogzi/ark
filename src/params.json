@@ -11,12 +11,18 @@
     "global_prefix": "",
     "global_species_name": "",
 
-    "// 2)": "CCS / cluster options [ cluster_mode: per_sample, multi_sample, both; flnc pools inputs the same way | cluster_engine: isoseq, cdhit, rattle ] ─────",
+    "// 2)": "CCS / cluster options [ cluster_mode: per_sample, multi_sample, both; flnc pools inputs the same way | cluster_engine: none, isoseq (legacy cluster2) ] ─────",
     "ccs_chunk": 1000,
     "skera_is_kinnex_library": false,
     "cluster_mode": "multi_sample",
-    "cluster_engine": "isoseq",
-    "cdhit_identity": 0.99,
+    "cluster_engine": "none",
+
+    "// 2a)": "FASTA/FASTQ input [ flnc_input_state: auto, ccs, fl, flnc, mixed, clustered ] ─────",
+    "flnc_input_state": "auto",
+
+    "// 2c)": "Transcript reconstruction [ reconstruct_engine: chain, none | reconstruct_preset: sensitive, balanced, strict ] ─────",
+    "reconstruct_engine": "chain",
+    "reconstruct_preset": "balanced",
 
     "// 2b)": "Chunking options ────────────────────────────────────────",
     "fxsplit_chunk_size": 50000,

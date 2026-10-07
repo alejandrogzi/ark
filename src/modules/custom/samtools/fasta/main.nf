@@ -19,7 +19,7 @@ process SAMTOOLS_FASTA {
 
     script:
     def prefix = task.ext.prefix ?: "${meta.id}"
-    // INFO: FASTA, not FASTQ: cd-hit-est and RATTLE ignore qualities, so they would only double the bytes.
+    // INFO: FASTA, not FASTQ: nothing downstream reads qualities, so they would only double the bytes.
     // INFO: -0 takes the unpaired reads (all PacBio reads); .gz makes it multi-threaded BGZF.
     """
     samtools fasta -@ ${task.cpus} -0 ${prefix}.fasta.gz ${bam}

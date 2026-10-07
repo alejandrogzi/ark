@@ -5,7 +5,7 @@ process APARENT_PREDICT {
     conda "${moduleDir}/environment.yml"
     container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
         '':
-        'ghcr.io/alejandrogzi/isox-py:latest' }"
+        'ghcr.io/alejandrogzi/isox-py:v2.1.0' }"
 
     input:
     tuple val(meta), path(chunk_tsv)
