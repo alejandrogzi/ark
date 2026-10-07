@@ -22,8 +22,8 @@ include { BAM_TO_FA } from '../../modules/custom/bamtofa/main.nf'
 include { BAM_TO_FA as BAM_TO_FA_MULTI_SAMPLE } from '../../modules/custom/bamtofa/main.nf'
 
 include { SAMTOOLS_FASTA } from '../../modules/custom/samtools/fasta/main.nf'
-include { CDHIT_EST } from '../../modules/custom/cdhit/est/main.nf'
-include { RATTLE } from '../../modules/custom/rattle/main.nf'
+
+include { POOL_READS } from '../pool_reads/main.nf'
 
 /*
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -37,7 +37,7 @@ workflow ISOSEQ {
       global_primers         // path
       ccs_chunk              // int
       cluster_mode           // string [ per_sample, multi_sample, both ]
-      cluster_engine         // string [ isoseq, cdhit, rattle ]
+      cluster_engine         // string [ none, isoseq ]
       prefix                 // string
       entrypoint             // [ subreads, ccs, refine, cluster ] (flnc unreachable)
       is_kinnex_library      // bool
@@ -48,8 +48,8 @@ workflow ISOSEQ {
       //   ccs      [CCS BAMs]          -> SKERA (Kinnex only) -> LIMA -> ISOSEQ_REFINE -> ISOSEQ_CLUSTER2
       //   refine   [02_LIMA]           -> ISOSEQ_REFINE -> ISOSEQ_CLUSTER2
       //   cluster  [03_ISOSEQ_REFINE]  -> ISOSEQ_CLUSTER2
-      // INFO: cluster_engine cdhit/rattle swaps ISOSEQ_CLUSTER2 + BAM_TO_FA for SAMTOOLS_FASTA -> CDHIT_EST/RATTLE;
-      // INFO: their cluster entrypoint also takes tag-less FASTA/FASTQ (e.g. SRA reads)
+      // INFO: cluster_engine none (default) swaps ISOSEQ_CLUSTER2 + BAM_TO_FA for SAMTOOLS_FASTA -> POOL_READS:
+      // INFO: refined reads go straight to alignment and collapse chain builds the transcript models
       ch_versions = Channel.empty()
 
       // WARN: only LIMA and ISOSEQ_REFINE read primers; cluster runs neither, so the file is not required or opened
@@ -63,25 +63,10 @@ workflow ISOSEQ {
      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
-      // INFO: cluster also reads FASTA/FASTQ: [ [id: file name w/o .fast[aq](.gz), single_end], fastx ]
-      def input_glob = entrypoint == 'cluster' ? '*.{bam,fasta,fasta.gz,fastq,fastq.gz}' : '*.bam'
-      Channel
-          .fromPath("${global_input_dir}/${input_glob}", checkIfExists: true)
-          .branch { f ->
-              bam:   f.name.endsWith('.bam')
-              fastx: true
-          }
-          .set { ch_input }
-
-      ch_fastx = ch_input.fastx.map { fastx ->
-          if (cluster_engine == 'isoseq') {
-              error "ERROR: ${fastx.name} carries no PacBio tags for isoseq cluster2; use --cluster_engine cdhit or rattle"
-          }
-          [ [ id: fastx.name.replaceFirst(/\.fast[aq](\.gz)?$/, ''), single_end: true ], fastx ]
-      }
-
       // INFO: every *.bam in global_input_dir -> [ [id: file name w/o .bam, single_end, indexed], bam, pbi or [] ]
-      ch_input.bam
+      // INFO: FASTA/FASTQ inputs belong to the flnc entrypoint
+      Channel
+          .fromPath("${global_input_dir}/*.bam", checkIfExists: true)
           .map { bam ->
               def pbi = bam + '.pbi'
               return [
@@ -98,7 +83,7 @@ workflow ISOSEQ {
 
 
       // INFO: PacBio tools need a .pbi next to each BAM; build it only where it is missing
-      // INFO: (cluster BAMs bound for cdhit/rattle only meet samtools, so they need none)
+      // INFO: (cluster BAMs without cluster2 only meet samtools, so they need none)
       def needs_pbi = !(entrypoint == 'cluster' && cluster_engine != 'isoseq')
       ch_bam
           .branch {
@@ -320,38 +305,19 @@ workflow ISOSEQ {
         ch_versions = ch_versions.mix(ISOSEQ_CLUSTER2_MULTI_SAMPLE.out.versions)
       }
 
-      if (cluster_engine != 'isoseq') {
-        // INFO: neither engine reads BAM: refined BAMs become FASTA once (both modes reuse it);
-        // INFO: cluster-entrypoint FASTA/FASTQ go in as they are. Items: [ meta, reads ]
+      if (cluster_engine == 'none') {
+        // INFO: no clustering: refined reads become FASTA once and pool like flnc reads, one hq class per sample
         SAMTOOLS_FASTA(ch_refined_bams)
-        ch_engine_reads = SAMTOOLS_FASTA.out.fasta.mix(ch_fastx)
-        ch_versions = ch_versions.mix(SAMTOOLS_FASTA.out.versions)
-
-        ch_engine_in = Channel.empty()
-        if (cluster_mode in ['per_sample', 'both']) {
-          ch_engine_in = ch_engine_in.mix(ch_engine_reads)
-        }
-        if (cluster_mode in ['multi_sample', 'both']) {
-          // INFO: one task takes every file of the pool (rattle reads them all, cd-hit merges in-task);
-          // INFO: sorted by name since cd-hit is order-dependent. [ [id: global_prefix, single_end], [reads] ]
-          ch_engine_in = ch_engine_in.mix(
-            ch_engine_reads
-              .map { meta, reads -> reads }
-              .collect(sort: { a, b -> a.name <=> b.name })
-              .map { reads -> [ [ id: prefix, single_end: true ], reads ] }
-          )
-        }
-
-        // INFO: same contract as BAM_TO_FA: [ meta + [singleton], <id>.{hq,singletons}.fasta.gz ]
-        if (cluster_engine == 'cdhit') {
-          CDHIT_EST(ch_engine_in)
-          ch_pbccs_merged_flnc_clustered_fa = CDHIT_EST.out.singletons.mix(CDHIT_EST.out.hq)
-          ch_versions = ch_versions.mix(CDHIT_EST.out.versions)
-        } else {
-          RATTLE(ch_engine_in)
-          ch_pbccs_merged_flnc_clustered_fa = RATTLE.out.singletons.mix(RATTLE.out.hq)
-          ch_versions = ch_versions.mix(RATTLE.out.versions)
-        }
+        POOL_READS(
+          SAMTOOLS_FASTA.out.fasta.map { meta, fasta -> [ meta + [ sample_id: meta.id, singleton: false ], fasta ] },
+          cluster_mode,
+          prefix
+        )
+        ch_pbccs_merged_flnc_clustered_fa = POOL_READS.out.reads
+        ch_versions = ch_versions.mix(SAMTOOLS_FASTA.out.versions, POOL_READS.out.versions)
+      } else {
+        // INFO: cluster2 records stand for >= 2 reads each, so collapse chain keeps every distinct chain
+        ch_pbccs_merged_flnc_clustered_fa = ch_pbccs_merged_flnc_clustered_fa.map { meta, fa -> [ meta + [ clustered: true ], fa ] }
       }
 
     /*
@@ -361,7 +327,7 @@ workflow ISOSEQ {
     */
 
     emit:
-        reads   = ch_pbccs_merged_flnc_clustered_fa // [ meta + [singleton], <id>.{hq,singletons}.fasta.gz ]
+        reads   = ch_pbccs_merged_flnc_clustered_fa // [ meta + [singleton(, clustered)], reads FASTA ]
         versions = ch_versions
 }
 
