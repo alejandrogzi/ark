@@ -174,7 +174,7 @@ fn par_parse_tracks(
 /// This struct represents a Union-Find data structure for efficiently
 /// finding connected components in a graph. It maintains a parent array
 /// and a size array to track the connected components.
-struct Dsu {
+pub(crate) struct Dsu {
     parent: Vec<usize>,
     size: Vec<usize>,
 }
@@ -195,7 +195,7 @@ impl Dsu {
     /// ```rust, ignore
     /// let dsu = Dsu::new(10);
     /// ```
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         Self {
             parent: (0..n).collect(),
             size: vec![1; n],
@@ -218,7 +218,7 @@ impl Dsu {
     /// let mut dsu = Dsu::new(10);
     /// dsu.find(5); // Returns 0
     /// ```
-    fn find(&mut self, x: usize) -> usize {
+    pub(crate) fn find(&mut self, x: usize) -> usize {
         if self.parent[x] != x {
             self.parent[x] = self.find(self.parent[x]);
         }
@@ -238,7 +238,7 @@ impl Dsu {
     /// let mut dsu = Dsu::new(10);
     /// dsu.union(5, 7); // Union of 5 and 7 is 5
     /// ```
-    fn union(&mut self, a: usize, b: usize) {
+    pub(crate) fn union(&mut self, a: usize, b: usize) {
         let mut ra = self.find(a);
         let mut rb = self.find(b);
         if ra == rb {

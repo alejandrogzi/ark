@@ -104,6 +104,9 @@ fn main() {
                 }
             };
         }
+        Command::Chain(args) => {
+            collapse::chain::run(args).unwrap_or_else(|e| panic!("ERROR: {e}"));
+        }
     }
 
     let elapsed = start.elapsed();

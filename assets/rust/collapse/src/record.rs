@@ -711,7 +711,7 @@ mod tests {
         );
 
         let bytes = key.to_bytes_canonical();
-        assert_eq!(bytes.len(), 31);
+        assert_eq!(bytes.len(), 23 + 2 * 8); // fixed header + 8 bytes per gap
     }
 
     #[test]

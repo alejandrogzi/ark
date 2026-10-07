@@ -34,6 +34,8 @@ include { ISOTOOLS_ALIGN as ISOTOOLS_FIND_FRAGMENTS } from '../../modules/custom
 
 include { COLLAPSE as COLLAPSE_TWINS } from '../../modules/custom/collapse/main.nf'
 
+include { RECONSTRUCT } from '../reconstruct/main.nf'
+
 /*
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     LOCAL SUBWORKFLOWS
@@ -53,6 +55,7 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
       collapse_twins           // bool
       cigar_extension          // bool
       do_second_pass           // bool
+      reconstruct_engine       // string [ chain, none ]
       ch_versions              // [ meta, versions.yml ]
 
     main:
@@ -312,7 +315,7 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
           .set { ch_aligned_segmented }
 
       // INFO: regroup by [ chr, sample_id ]: all chunks, hq + singleton, of one sample on one chromosome.
-      // INFO: ch_aligned_segmented_hq_per_chr: [ [ id: sample_id, single_end: true, chr ], [ beds ] ]
+      // INFO: ch_aligned_segmented_hq_per_chr: [ [ id: sample_id, single_end: true, chr, clustered ], [ beds ] ]
       ch_aligned_segmented
           .flatMap { meta, bed ->
               def beds = bed instanceof List ? bed : [bed]
@@ -326,7 +329,7 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
           .groupTuple(by: 0)
           .map { key, metas, beds ->
               def meta = metas[0]
-              def group_meta = [ id: meta.sample_id, single_end: true, chr: meta.chr ]
+              def group_meta = [ id: meta.sample_id, single_end: true, chr: meta.chr, clustered: metas.any { it.clustered } ]
               [ group_meta, beds ]
           }
           .set { ch_aligned_segmented_hq_per_chr }
@@ -338,8 +341,12 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
       */
 
       // INFO: same per-chromosome shape in and out; fusion emits free (non-fusion) reads and fusions
+      // INFO: twin collapse only applies without a reconstruction engine (collapse chain supersedes it)
+      if (collapse_twins && reconstruct_engine != 'none') {
+        log.warn "collapse_shrink_twins is ignored with reconstruct_engine ${reconstruct_engine}"
+      }
       ch_aligned_segmented_collapsed = Channel.empty()
-      if (collapse_twins) {
+      if (collapse_twins && reconstruct_engine == 'none') {
         COLLAPSE_TWINS(ch_aligned_segmented_hq_per_chr)
         ch_aligned_segmented_collapsed = COLLAPSE_TWINS.out.collapsed
       } else {
@@ -350,6 +357,39 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
         ch_aligned_segmented_collapsed, 
         ch_reference_transcripts
       )
+
+      /*
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+          TRANSCRIPT RECONSTRUCTION [ RECONSTRUCT: chain ]
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      */
+
+      // INFO: fusion detection decides by read ratios, so it reads reads; both of its outputs are then
+      // INFO: collapsed into models per [ sample_id, chr ] (meta.class keeps the two apart)
+      ch_free_reads   = ISOTOOLS_FUSION_DETECTOR.out.free_fusion
+      ch_fusion_reads = ISOTOOLS_FUSION_DETECTOR.out.fusion
+      ch_support      = Channel.empty()
+      if (reconstruct_engine != 'none') {
+        RECONSTRUCT(
+          ch_free_reads.map { meta, bed -> [ meta + [ class: 'free' ], bed ] }
+            .mix(ch_fusion_reads.map { meta, bed -> [ meta + [ class: 'fusion' ], bed ] }),
+          ch_reference_transcripts,
+          reconstruct_engine
+        )
+
+        RECONSTRUCT.out.models
+          .map { meta, bed -> [ meta.findAll { k, v -> k != 'class' }, bed, meta.class ] }
+          .branch { meta, bed, cls ->
+            free:   cls == 'free'
+            fusion: true
+          }
+          .set { ch_models }
+
+        ch_free_reads   = ch_models.free.map { meta, bed, cls -> [ meta, bed ] }
+        ch_fusion_reads = ch_models.fusion.map { meta, bed, cls -> [ meta, bed ] }
+        ch_support      = RECONSTRUCT.out.support
+        ch_versions = ch_versions.mix(RECONSTRUCT.out.versions)
+      }
 
       ch_versions = ch_versions.mix(FXSPLIT.out.versions)
       ch_versions = ch_versions.mix(ISOTOOLS_SEGMENT_POLYA.out.versions)
@@ -362,8 +402,10 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
     */
 
     emit:
-      reads    = ISOTOOLS_FUSION_DETECTOR.out.free_fusion
-      fusions  = ISOTOOLS_FUSION_DETECTOR.out.fusion
+      reads    = ch_free_reads                              // models (chain) or reads (none)
+      fusions  = ch_fusion_reads                            // fusion models (chain) or reads (none)
+      evidence = ISOTOOLS_FUSION_DETECTOR.out.free_fusion   // uncollapsed free reads (intron frequencies)
+      support  = ch_support                                 // [ meta, support.tsv, counts.tsv ]
       versions = ch_versions
 }
 

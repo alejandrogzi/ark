@@ -48,6 +48,70 @@ pub struct Args {
 pub enum Command {
     Run(RunArgs),
     Read(ReadArgs),
+    /// Call transcript models from segmented reads by intron chain
+    Chain(ChainArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct ChainArgs {
+    #[arg(
+        long = "bed",
+        required = true,
+        value_name = "PATHS",
+        value_delimiter = ',',
+        num_args = 1..,
+        help = "Segmented BED12 files of one [sample, chr] delimited by comma"
+    )]
+    pub bed: Vec<PathBuf>,
+
+    #[arg(
+        long = "ref",
+        value_name = "PATH",
+        help = "Reference transcripts (BED12)"
+    )]
+    pub reference: PathBuf,
+
+    #[arg(long = "prefix", value_name = "PREFIX", help = "Output prefix")]
+    pub prefix: String,
+
+    #[arg(long = "preset", value_enum, default_value = "balanced")]
+    pub preset: Preset,
+
+    #[arg(
+        long = "min-support-novel",
+        value_name = "INT",
+        help = "Molecules for a novel multi-exon chain [preset]"
+    )]
+    pub min_support_novel: Option<usize>,
+
+    #[arg(
+        long = "min-support-mono",
+        value_name = "INT",
+        help = "Molecules for a novel mono-exonic cluster [preset]"
+    )]
+    pub min_support_mono: Option<usize>,
+
+    #[arg(
+        long = "min-read-fraction",
+        value_name = "FLOAT",
+        help = "Share of locus reads kept novel models must cover [preset]"
+    )]
+    pub min_read_fraction: Option<f64>,
+
+    #[arg(long = "junction-wobble", value_name = "INT", default_value_t = 5)]
+    pub junction_wobble: u32,
+
+    // ponytail: accepted for the Nextflow contract and ignored; one [sample, chr] is
+    // single-threaded work, rayon over (chrom, strand) buckets if it ever matters
+    #[arg(long = "threads", value_name = "THREADS", default_value_t = 1)]
+    pub threads: usize,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Preset {
+    Sensitive,
+    Balanced,
+    Strict,
 }
 
 #[derive(Parser, Debug)]

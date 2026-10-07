@@ -16,6 +16,7 @@
 //! rows are grouped together. The deduplicated entries are held in memory alongside
 //! their corresponding read identifier queues [maintaining original order for reconstruction].
 
+pub mod chain;
 pub mod cli;
 pub mod record;
 pub mod utils;

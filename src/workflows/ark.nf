@@ -90,6 +90,7 @@ workflow ARK {
         params.ccs_chunk,
         params.cluster_mode,
         params.cluster_engine,
+        params.flnc_input_state,
         params.xorf_protein_database,
         params.xorf_custom_database,
         params.xorf_raw_database,
@@ -131,6 +132,7 @@ workflow ARK {
           params.collapse_shrink_twins,
           params.isotools_cigar_extension_extend,
           params.minimap2_align_do_second_pass,
+          params.reconstruct_engine,
           ch_versions
         )
 
@@ -272,9 +274,18 @@ workflow ARK {
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: intron classification counts reads (seen / spanned), so with a reconstruction engine it reads
+      // INFO: the uncollapsed evidence, re-keyed to the xORF meta ([ id: <sample>@<chr>, name: <sample>, chr ])
+      // INFO: so the POLISH join on meta.id still pairs it with the models
+      ch_prepolish_reads = params.reconstruct_engine == 'none'
+          ? ISOTOOLS_NMD_FILTER.out.reads
+          : SPLIT_ALIGN_CLEAN_CHUNKS.out.evidence.map { meta, bed ->
+              [ [ id: "${meta.id}@${meta.chr}", name: meta.id, chr: meta.chr ], bed ]
+            }
+
       // INFO: per sample@chromosome: intron classification (tsv + BED4 track) and polyA peaks (bigWig per strand)
       ISOTOOLS_PREPOLISH(
-          ISOTOOLS_NMD_FILTER.out.reads,
+          ch_prepolish_reads,
           PREPROCESSING.out.genome,
           PREPROCESSING.out.chrom_sizes,
           params.global_repeats,
@@ -285,18 +296,19 @@ workflow ARK {
       )
 
       // INFO: polish input per sample@chromosome, joined on meta.id: [ meta, reads, intron tsv, ORF tsv ]
+      // INFO: keys as plain strings: xORF builds ids as GStrings, and a GString never equals a String
       ISOTOOLS_NMD_FILTER.out.reads
-        .map { meta, read -> tuple(meta.id, meta, read) }
+        .map { meta, read -> tuple(meta.id.toString(), meta, read) }
         .join(
           ISOTOOLS_PREPOLISH.out.introns
-            .map { meta, introns -> tuple(meta.id, introns) }
+            .map { meta, introns -> tuple(meta.id.toString(), introns) }
         )
         .map { id, meta, read, introns ->
           tuple(id, meta, read, introns)
         }
         .join(
           XORF_PREDICT_ORFS.out.files
-              .map { meta, bed, tsv -> tuple(meta.id, tsv) }
+              .map { meta, bed, tsv -> tuple(meta.id.toString(), tsv) }
         )
         .map { id, meta, read, introns, tsv ->
           tuple(meta, read, introns, tsv)
