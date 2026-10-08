@@ -55,6 +55,14 @@
 
 # Changelog
 
+## [v2.1.2] - unreleased
+
+- **`PBCCS` uses its task directory as `TMPDIR`.** ccs names its temp files `thread.<i>_<j>.<chunk>.bam`, so two runs sharing a `TMPDIR` (e.g. a lab-wide scratch) overwrote each other's files and failed. Seen with two giraffe runs on the same subreads.
+- **CI gold regenerated with the published v2.1.1 images.** The v2.1.1 gold came from collapse 0.1.0 and the old intron tables, so `master` CI failed on `flnc`.
+  - The clustered `flnc` input (`sensitive`) now drops its 5 single-read novel chains (`excluded_junction`; 8 → 3 models). xORF and NMD outputs shrink to match.
+  - Both entrypoints gain an `excluded_junction` counter and a `rejected.bed`, which is empty for `subreads`.
+  - The `subreads` intron table keeps its 46 introns but loses 5 duplicate rows.
+
 ## [v2.1.1] - 2026-10-07
 
 These fixes were found by running the containerized CI and real SRA data against the published v2.1.0 images.
