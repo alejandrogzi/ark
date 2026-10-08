@@ -7,12 +7,13 @@ reads_correction_skipped	0
 chains	8
 chains_absorbed	0
 models_known	3
-models_novel	5
+models_novel	0
 models_mono	0
 excluded_support	3
 excluded_fraction	0
 excluded_tail	0
 excluded_intronic	0
 excluded_intraprimed	0
-models_out	8
+excluded_junction	5
+models_out	3
 tail_rate	0.6364
