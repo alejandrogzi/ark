@@ -5,7 +5,7 @@
 */
 
 include { TWOBIT_TO_FA } from '../../modules/custom/ucsc/twobittofa/main'
-include { GUNZIP as GUNZIP_FASTA } from '../../modules/custom/gunzip/main'
+include { FASTA_CLEAN } from '../../modules/custom/fasta/clean/main'
 include { CHROMSIZE } from '../../modules/custom/chromsize/main'
 
 /*
@@ -30,15 +30,14 @@ workflow GENOME {
       // INFO: chromsize reads the input file as given (before any conversion)
       ch_chrom_sizes = CHROMSIZE([[:], genome_file]).chromsize.map { it[1] }
 
-      // INFO: if fasta is .2bit or .gz, convert or uncompress it
+      // INFO: .2bit is converted; FASTA is uncompressed and its headers cleaned
       if (genome_path.endsWith(".2bit")) {
           ch_fasta = TWOBIT_TO_FA([[:], genome_file]).fasta.map { it[1] }
           ch_versions = ch_versions.mix(TWOBIT_TO_FA.out.versions)
-      } else if (genome_path.endsWith(".gz")) {
-          ch_fasta = GUNZIP_FASTA([[:], genome_file]).gunzip.map { it[1] }
-          ch_versions = ch_versions.mix(GUNZIP_FASTA.out.versions)
       } else {
-          ch_fasta = Channel.value(genome_file)
+          // INFO: FASTA (.gz or plain): headers cut to their first word, which every downstream tool keys on
+          ch_fasta = FASTA_CLEAN([[:], genome_file]).fasta.map { it[1] }
+          ch_versions = ch_versions.mix(FASTA_CLEAN.out.versions)
       }
 
       ch_versions = ch_versions.mix(CHROMSIZE.out.versions)
