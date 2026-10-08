@@ -182,6 +182,9 @@ workflow ARK {
           params.global_output_dir,
           params.xorf_chunk_size,
           ch_samba_weights,
+          // INFO: xorf >= 0.1.0 folds BLAST peptides with ESMFold when esm is on;
+          // INFO: ARK never enables it, so pass a dummy path like xorf's own main.nf does
+          Channel.value(file("${moduleDir}/../params.json", checkIfExists: true)), // xorf_esm_weights
           params.xorf_predict_keep_raw,
           params.xorf_selenocysteine_codons,
           params.xorf_skip_netstart,
@@ -206,6 +209,9 @@ workflow ARK {
           params.global_output_dir,
           params.xorf_chunk_size,
           ch_samba_weights,
+          // INFO: xorf >= 0.1.0 folds BLAST peptides with ESMFold when esm is on;
+          // INFO: ARK never enables it, so pass a dummy path like xorf's own main.nf does
+          Channel.value(file("${moduleDir}/../params.json", checkIfExists: true)), // xorf_esm_weights
           params.xorf_predict_keep_raw,
           params.xorf_selenocysteine_codons,
           params.xorf_skip_netstart,
