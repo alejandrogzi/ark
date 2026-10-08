@@ -55,6 +55,62 @@
 
 # Changelog
 
+## [v2.1.1] - 2026-10-07
+
+These fixes were found by running the containerized CI and real SRA data against the published v2.1.0 images.
+
+- **Regression in v2.1.0: POLISH wrote no `pass` outputs.** `PREPOLISH` fed the uncollapsed reads to APARENT too. APARENT scans 3′ UTRs (ORF thick end to transcript end), and reads have no ORF yet, so no chunks were made. The PAS caller and the verdict step then never ran.
+  - `PREPOLISH` now takes two inputs: the ORF-annotated models (`reads`, for APARENT) and the uncollapsed reads (`evidence`, for intron frequencies).
+  - With `reconstruct_engine none` both inputs are the same channel, as in v2.0.x.
+- **lima hung on SRA-renamed reads.** lima 26.2.1 stalls on FASTQ whose names are not `movie/zmw/ccs` (SRA's `SRRxxx.N`), even with `--per-read`.
+  - The new `FASTX_RENAME` gives raw-CCS reads CCS names (`<sample>/<n>/ccs`) before `LIMA_FASTX`. The sample as movie keeps names unique across pools.
+  - On SRR27664179 (raw CCS), 3,400 of 3,783 reads pass, and the output inspects as `fl` (primer rate 0, polyA3 0.996, polyT5 0).
+  - `LIMA_FASTX` now publishes only its `*.lima.*` reports.
+- **CI gold regenerated** from a containerized run on the published images:
+  - only files whose line counts changed are updated;
+  - new outputs added: `05_FASTX` and `07B_RECONSTRUCT`;
+  - outputs of the cluster2 path removed (subreads now uses `cluster_engine none`).
+- **Intron tables now count each read once.** v2.0.x counted a read once per predicted ORF, inflating `seen / spanned`.
+- **Harness:** the lima stub asserts CCS-style names, so the renaming cannot silently disappear.
+- **`collapse chain` 0.1.1: junction correction moves whole introns and protects well-supported ones.**
+  - **Finding:** on LRGASP WTC11 SIRV-Set 4, 0.1.0 merged two real NAGNAG-type isoforms. SIRV604 vs SIRV612 is a 3 bp acceptor shift with 164 reads, and SIRV307 has 58. The guard was evaluated per site, so a minor acceptor was compared with every read at a major acceptor shared by several isoforms.
+  - **Introns move as a unit.** An intron moves only onto an existing read or reference intron within 5 bp at both ends that has at least 5× its support, so a corrected model only carries introns that exist.
+  - **Protection.** An intron with ≥ 20 reads, or ≥ 20% of its window, never moves. Annotated sites never move, and an annotated intron weighs at least as much as the reads at its weaker site.
+  - **SIRV (60 multi-exon isoforms), recall / precision / F1:**
+    - `balanced`: 0.933 / 0.824 / 0.875 before, 0.967 / 0.795 / 0.872 now;
+    - `strict`: 0.817 / 0.925 / 0.867 before, 0.850 / 0.944 / 0.895 now.
+  - **Other data:** mouse chr19 is unchanged (607 models). On giraffe NC_137277.1 (1.74M reads), models go from 25,585 to 25,732 (+0.6%).
+  - **Images:** `isox-rs` (collapse 0.1.1, aparent 0.0.4) and `isotools` (v0.0.46) modules now use `:latest`, matching `xloci:latest`.
+- **New option `reconstruct_junction_support` (`collapse chain --junction-support`), on by default; `--reconstruct_junction_support false` turns it off.** A novel chain resting on one molecule (a cluster2 singleton, `#SG`; or any single read when the input has no singletons) is dropped unless each of its novel introns is carried by another read. The dropped reads are written to `<prefix>.rejected.bed` (BED12, published next to the models) for the browser, and counted as `excluded_junction`.
+  - Why: with clustered input, `sensitive` keeps every chain. On the giraffe muscle slice, 2,799 of 2,905 cluster2-only models rested on one singleton; their novel junctions were flagged by PREPOLISH in 18% of models and non-canonical in 7%. A plain "≥ 2 molecules" rule would also drop 905 annotated chains.
+  - A record without `#SG` in a clustered input is a cluster of ≥ 2 reads and is never dropped.
+  - Benchmarks (all tools on the same 20,465 SIRV reads; giraffe `bam_isoseq` with and without the option):
+    - SIRV `sensitive`: precision 0.311 → 0.541 at the same recall (0.983); after cluster2, 0.365 → 0.667 at recall 0.967. `balanced` and `strict` are unchanged: they already need 2 reads per novel chain.
+    - Giraffe: 5,250 → 3,578 models, POLISH pass 3,192 → 2,309, xORF input 4,257 → 2,148 (`none` path: 2,166). All 1,628 known models are kept, as are 829/831 annotated-intron extras and 373/375 independently supported extras. 98.6% of flagged and 94.6% of non-canonical extras are dropped.
+    - Cost: unconfirmed single-molecule canonical chains go too (624, of which 402 pass POLISH; 231 use new splice sites). Turn the option off when rare novel isoforms matter more than precision.
+  - Needs collapse 0.1.1 (`isox-rs:latest` once published); the v2.1.0 image has no `--junction-support`.
+- **`ISOTOOLS_INTRON_RETENTION` panicked on corrected models** (`Intron not found`; giraffe genome).
+  - Wobble correction moves a model's donor and acceptor independently, so a model can carry an intron that no uncollapsed read has, and the read-built intron table lacks it.
+  - With a reconstruction engine on, iso-intron now runs with `--allow-missing`: it warns and skips such introns. Their sites carry at least 5× more read support, so they are not RT-artifact candidates.
+  - Root cause, fixed by collapse 0.1.1. On giraffe NC_137275.1, `1049593-1051084(+)` is in no read: 0.1.0 moved a 4-read donor (1049588) onto 1049593, which 538 reads use with another acceptor. 0.1.0 made 2 such introns on that chromosome (of 19,164), 0.1.1 none. `--allow-missing` stays as a guard.
+- **`XLOCI_EXTRACT_INTRONS` no longer fails on introns near a contig end.** xloci 0.0.6 panicked with "Feature coordinate 54 is underflowing by 100 bases" when an intron sat closer than the 100 bp flank to a contig start; this was seen on an ERCC spike-in contig and can also happen on short scaffolds. The step now runs with `--ignore-errors`, so only that intron is skipped.
+- **`-resume` no longer reruns alignment and everything after it** (present since v2.0.0). `SAMTOOLS_BAM` deleted the SAM it got from `ARK_ALIGN`, so the cached alignment task had a missing output on every resume.
+  - `ARK_ALIGN`, `ARK_ALIGN_FRAGMENTS`, `MINIMAP2_ALIGN` and `FLAIR_ALIGN` now pipe minimap2 into `samtools sort` and index in the same task (biocontainers mulled image: minimap2 2.31, samtools 1.23.1). No SAM is written and the `SAMTOOLS_BAM` step is gone for them; deSALT keeps it.
+  - BAMs are published where they were (`06_ARK_ALIGN/BAM`, `06_ARK_ALIGN/FRAGMENTS`, …); the `SAM` symlink folders are gone. `minimap2_align_keep_sam` now applies to deSALT only.
+  - The flnc e2e matches gold, and a second `-resume` run caches all 75 tasks.
+- **Intron tables hold each intron once.** xloci wrote one row per read and intron; on the giraffe pilot, NC_137281.1 had 17,056,867 rows for 59,054 introns (32 GB), and intronIC was killed at 72 GB. `XLOCI_EXTRACT_INTRONS` now keeps the first row per intron name (the name is the coordinates). intronIC only needs each intron once, and iso-classify takes frequencies from the reads, so results are unchanged; the CI gold already had unique rows.
+- **APARENT no longer fails on transcripts that end near a contig end** (`aparent` 0.0.4, `assets/rust/aparent`). The 100 bp downstream flank ran past the end of short contigs ("Interval 944-1151 exceeds chromosome length 1051", ERCC-00130) and the whole chunking task exited. The flank is now clipped at the contig end. Ships with the next `isox-rs` image.
+  - `XISO_APARENT_CHUNK` now uses its own `aparent_chunker_{upstream,downstream}_flank` params instead of the xloci ones (both default to 100).
+- **Genome FASTA headers are cut to their first word** (new `FASTA_CLEAN`, which replaces `GUNZIP_FASTA` and also runs on plain FASTA).
+  - Before, `XLOCI_EXTRACT_INTRONS` failed with "Chromosome chr12 ... not found in genome" on any FASTA whose headers carry descriptions, as NCBI, Ensembl and LRGASP headers do: xloci keyed sequences by the whole header line, while minimap2 and the other tools key them by the first word.
+  - IUPAC ambiguity codes become N/n, case kept: xloci 0.0.6 panicked on them (`ERROR: Invalid base`, GRCh38 chr21, which has 94 such bases genome-wide).
+  - Output names are unchanged.
+- **xORF `PREDICT` no longer fails on chunks without DIAMOND hits** (fixed in the `modules/xorf` working tree, `modules/predict/predict.py`). Synthetic ERCC spike-ins, and any small rescued chunk without protein hits, made pandas raise `EmptyDataError`. An empty DIAMOND or RNAsamba table now yields empty prediction files. Rebuild `ghcr.io/hillerlab/orf-predict` to ship it.
+- **CI references labelled correctly.** The CI genome is human chr19 (hg38). Its annotation is a mouse-to-human TOGA projection, so it carries mouse gene names in hg38 coordinates.
+  - The CI passed `--global_species_name mm39` and mm39 selenocysteine codons, so xORF could never match a Sec codon on chr19 (e.g. GPX4).
+  - `assets/test_data/data/hg38.selenocysteine.bed` (47 Sec codons from GENCODE v38) replaces `mm39.selenocysteine.bed`, and the species is now `hg38`.
+  - No CI read overlaps a selenoprotein, so the gold is unchanged; both e2e runs still match it.
+
 ## [v2.1.0] - 2026-10-07
 
 BREAKING release. Transcript models, not individual reads, now reach ORF prediction. Refined reads are no longer clustered before alignment. Every FASTA/FASTQ input is classified and cleaned before alignment. Design, evidence and pilot plan: `PLAN.md` and `reports/2026-10-07_isoseq_fastq_reconstruction_review.md`.
