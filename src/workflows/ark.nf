@@ -276,8 +276,9 @@ workflow ARK {
 
       // INFO: intron classification counts reads (seen / spanned), so with a reconstruction engine it reads
       // INFO: the uncollapsed evidence, re-keyed to the xORF meta ([ id: <sample>@<chr>, name: <sample>, chr ])
-      // INFO: so the POLISH join on meta.id still pairs it with the models
-      ch_prepolish_reads = params.reconstruct_engine == 'none'
+      // INFO: so the POLISH join on meta.id still pairs it with the models; APARENT keeps the ORF-annotated
+      // INFO: models because it scans their 3' UTRs (thick end to transcript end)
+      ch_prepolish_evidence = params.reconstruct_engine == 'none'
           ? ISOTOOLS_NMD_FILTER.out.reads
           : SPLIT_ALIGN_CLEAN_CHUNKS.out.evidence.map { meta, bed ->
               [ [ id: "${meta.id}@${meta.chr}", name: meta.id, chr: meta.chr ], bed ]
@@ -285,7 +286,8 @@ workflow ARK {
 
       // INFO: per sample@chromosome: intron classification (tsv + BED4 track) and polyA peaks (bigWig per strand)
       ISOTOOLS_PREPOLISH(
-          ch_prepolish_reads,
+          ISOTOOLS_NMD_FILTER.out.reads,
+          ch_prepolish_evidence,
           PREPROCESSING.out.genome,
           PREPROCESSING.out.chrom_sizes,
           params.global_repeats,
