@@ -54,9 +54,9 @@ jobs:
             --global_repeats "$D/chr19.repeats.bed" \
             --global_primers "$D/primers.fa" \
             --spliceai_scores_path "$D/chr19.spliceai.toga2.derived.tsv.gz" \
-            --xorf_selenocysteine_codons "$D/mm39.selenocysteine.bed" \
+            --xorf_selenocysteine_codons "$D/hg38.selenocysteine.bed" \
             --global_prefix test_fasta \
-            --global_species_name mm39
+            --global_species_name hg38
 
       - name: Compare against golden truth
         run: python3 assets/ci/compare.py assets/test_data/gold/${{ matrix.entrypoint }} results/${{ matrix.entrypoint }}

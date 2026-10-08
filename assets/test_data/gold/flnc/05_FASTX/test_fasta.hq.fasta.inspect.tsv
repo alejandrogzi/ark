@@ -1,0 +1,2 @@
+file	reads	state	kit	primer_rate	polya3	polyt5	mean_len	mean_qv	qv_constant	name_style	note
+test_fasta.hq.fasta.gz	3	clustered	none	0.0000	1.0000	0.0000	2033.3	NA	NA	clustered	-
