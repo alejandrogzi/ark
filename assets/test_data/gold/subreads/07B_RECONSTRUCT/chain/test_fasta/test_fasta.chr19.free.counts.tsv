@@ -14,5 +14,6 @@ excluded_fraction	0
 excluded_tail	0
 excluded_intronic	0
 excluded_intraprimed	0
+excluded_junction	0
 models_out	3
 tail_rate	0.6667
