@@ -33,6 +33,13 @@ process XLOCI_INTRON {
         -t $task.cpus \\
         --prefix ${prefix}
 
+    # INFO: xloci writes one row per read and intron (17M rows for 59k introns on a giraffe chromosome);
+    # INFO: the name is the intron's coordinates, and intronIC only needs each intron once
+    for tsv in *.tsv; do
+        [ -e "\$tsv" ] || continue
+        awk -F'\t' '!seen[\$1]++' "\$tsv" > "\$tsv.unique" && mv "\$tsv.unique" "\$tsv"
+    done
+
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
         xloci: \$( xloci --version | head -n 1 | sed 's/xloci //g' | sed 's/ (.*//g' )
