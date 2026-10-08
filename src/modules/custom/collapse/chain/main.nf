@@ -14,7 +14,7 @@ process CHAIN_COLLAPSE {
     tag "$meta.id:$meta.chr:$meta.class"
     label 'process_medium'
 
-    container 'ghcr.io/alejandrogzi/isox-rs:v2.1.0'
+    container 'ghcr.io/alejandrogzi/isox-rs:latest'
 
     input:
     tuple val(meta), path(beds, stageAs: 'beds/*')
@@ -24,6 +24,7 @@ process CHAIN_COLLAPSE {
     tuple val(meta), path("*.models.bed")                         , emit: models
     tuple val(meta), path("*.support.tsv"), path("*.counts.tsv")    , emit: support
     tuple val(meta), path("*.members.tsv.gz"), path("*.excluded.bed"), emit: members
+    tuple val(meta), path("*.rejected.bed")                       , optional: true, emit: rejected // INFO: reads dropped by --junction-support
     path "versions.yml"                                           , emit: versions
 
     when:
@@ -52,7 +53,7 @@ process CHAIN_COLLAPSE {
     stub:
     def prefix = task.ext.prefix ?: "${meta.id}.${meta.chr}.${meta.class}"
     """
-    touch ${prefix}.models.bed ${prefix}.support.tsv ${prefix}.counts.tsv ${prefix}.excluded.bed
+    touch ${prefix}.models.bed ${prefix}.support.tsv ${prefix}.counts.tsv ${prefix}.excluded.bed ${prefix}.rejected.bed
     echo | gzip > ${prefix}.members.tsv.gz
 
     cat <<-END_VERSIONS > versions.yml

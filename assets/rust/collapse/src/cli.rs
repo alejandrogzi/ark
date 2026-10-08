@@ -101,6 +101,13 @@ pub struct ChainArgs {
     #[arg(long = "junction-wobble", value_name = "INT", default_value_t = 5)]
     pub junction_wobble: u32,
 
+    #[arg(
+        long = "junction-support",
+        help = "Drop a novel chain resting on one singleton molecule unless each of its novel introns is in another read; dropped reads go to <prefix>.rejected.bed",
+        action = ArgAction::SetTrue
+    )]
+    pub junction_support: bool,
+
     // ponytail: accepted for the Nextflow contract and ignored; one [sample, chr] is
     // single-threaded work, rayon over (chrom, strand) buckets if it ever matters
     #[arg(long = "threads", value_name = "THREADS", default_value_t = 1)]
