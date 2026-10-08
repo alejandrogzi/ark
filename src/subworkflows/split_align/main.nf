@@ -17,10 +17,6 @@ include { FXSPLIT } from '../../modules/custom/fxsplit/main.nf'
 include { SAMTOOLS_BAM } from '../../modules/custom/samtools/bam/main.nf'
 include { SAMTOOLS_BAM as SAMTOOLS_BAM_PBMM2_ALIGN } from '../../modules/custom/samtools/bam/main.nf'
 include { SAMTOOLS_BAM as SAMTOOLS_BAM_DESALT_ALIGN } from '../../modules/custom/samtools/bam/main.nf'
-include { SAMTOOLS_BAM as SAMTOOLS_BAM_MINIMAP2_ALIGN } from '../../modules/custom/samtools/bam/main.nf'
-include { SAMTOOLS_BAM as SAMTOOLS_BAM_ARK_ALIGN } from '../../modules/custom/samtools/bam/main.nf'
-include { SAMTOOLS_BAM as SAMTOOLS_BAM_FLAIR_ALIGN } from '../../modules/custom/samtools/bam/main.nf'
-include { SAMTOOLS_BAM as SAMTOOLS_BAM_FRAGMENTS } from '../../modules/custom/samtools/bam/main.nf'
 
 include { SAMTOOLS_INDEX as SAMTOOLS_INDEX_PBMM2 } from '../../modules/custom/samtools/index/main.nf'
 
@@ -116,10 +112,8 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
                 )
             }
 
-            SAMTOOLS_BAM_ARK_ALIGN(ARK_ALIGN.out.sam)
-            ch_aligned_bam = SAMTOOLS_BAM_ARK_ALIGN.out.bam
-            ch_aligned_bai = SAMTOOLS_BAM_ARK_ALIGN.out.bai
-            ch_versions = ch_versions.mix(SAMTOOLS_BAM_ARK_ALIGN.out.versions)
+            ch_aligned_bam = ARK_ALIGN.out.bam
+            ch_aligned_bai = ARK_ALIGN.out.bai
             ch_versions = ch_versions.mix(ARK_ALIGN.out.versions)
           break
 
@@ -140,10 +134,8 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
                 )
             }
 
-            SAMTOOLS_BAM_MINIMAP2_ALIGN(MINIMAP2_ALIGN.out.sam)
-            ch_aligned_bam = SAMTOOLS_BAM_MINIMAP2_ALIGN.out.bam
-            ch_aligned_bai = SAMTOOLS_BAM_MINIMAP2_ALIGN.out.bai
-            ch_versions = ch_versions.mix(SAMTOOLS_BAM_MINIMAP2_ALIGN.out.versions)
+            ch_aligned_bam = MINIMAP2_ALIGN.out.bam
+            ch_aligned_bai = MINIMAP2_ALIGN.out.bai
             ch_versions = ch_versions.mix(MINIMAP2_ALIGN.out.versions)
           break
 
@@ -193,10 +185,8 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
             Channel.value([[:], []])
           )
 
-          SAMTOOLS_BAM_FLAIR_ALIGN(FLAIR_ALIGN.out.sam)
-          ch_aligned_bam = SAMTOOLS_BAM_FLAIR_ALIGN.out.bam
-          ch_aligned_bai = SAMTOOLS_BAM_FLAIR_ALIGN.out.bai
-          ch_versions = ch_versions.mix(SAMTOOLS_BAM_FLAIR_ALIGN.out.versions)
+          ch_aligned_bam = FLAIR_ALIGN.out.bam
+          ch_aligned_bai = FLAIR_ALIGN.out.bai
           ch_versions = ch_versions.mix(FLAIR_ALIGN.out.versions)
         break
 
@@ -288,10 +278,10 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
           ch_reference_transcripts
         )
 
-        SAMTOOLS_BAM_FRAGMENTS(ARK_ALIGN_FRAGMENTS.out.sam)
-        SAMTOOLS_BAM_FRAGMENTS.out.bam
-            .join(SAMTOOLS_BAM_FRAGMENTS.out.bai)
+        ARK_ALIGN_FRAGMENTS.out.bam
+            .join(ARK_ALIGN_FRAGMENTS.out.bai)
             .set { ch_fragments_bam }
+        ch_versions = ch_versions.mix(ARK_ALIGN_FRAGMENTS.out.versions)
 
 
       } else {

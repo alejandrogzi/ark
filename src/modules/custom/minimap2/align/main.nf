@@ -4,8 +4,8 @@ process MINIMAP2_ALIGN {
 
     conda "${moduleDir}/environment.yml"
     container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
-        'https://depot.galaxyproject.org/singularity/minimap2:2.31--h118bc1c_0' :
-        'biocontainers/minimap2:2.31--h118bc1c_0' }"
+        'https://depot.galaxyproject.org/singularity/mulled-v2-66534bcbb7031a148b13e2ad42583020b9cd25c4:b411340b52d82a9c276d87c7a3dcffc880be762f-0' :
+        'biocontainers/mulled-v2-66534bcbb7031a148b13e2ad42583020b9cd25c4:b411340b52d82a9c276d87c7a3dcffc880be762f-0' }"
 
     input:
     tuple val(meta), path(reads)
@@ -14,8 +14,9 @@ process MINIMAP2_ALIGN {
     tuple val(meta3), path(junc_bed)
 
     output:
-    // WARN: not optional. SAMTOOLS_BAM deletes the SAM; on -resume a missing required output reruns this task instead of silently emitting nothing
-    tuple val(meta), path("*.sam")                       , emit: sam
+    // INFO: minimap2 pipes into samtools sort, so no SAM is written and nothing downstream deletes this task's outputs (-resume keeps it cached)
+    tuple val(meta), path("*.bam")                       , emit: bam
+    tuple val(meta), path("*.bai")                       , emit: bai
     path "versions.yml"                                  , emit: versions
 
     when:
@@ -23,10 +24,8 @@ process MINIMAP2_ALIGN {
 
     script:
     def args  = task.ext.args ?: ''
-    def keep_temp = task.ext.keep_temp ?: false
-    
     def singleton = meta.singleton ? ".singleton" : ""
-    def sam = "${meta.id}.${meta.chunk}${singleton}.sam"
+    def bam = "${meta.id}.${meta.chunk}${singleton}.bam"
     def spsc = splice_scores ? "--spsc=${splice_scores}" : ''
     def junc = task.ext.use_junc_bed ? "--junc-bed ${junc_bed}" : ''
     """
@@ -37,18 +36,22 @@ process MINIMAP2_ALIGN {
         -t $task.cpus \\
         ${reference} \\
         ${reads} \\
-        -o $sam
+        | samtools sort -@ ${task.cpus} -o $bam -
+
+    samtools index -@ ${task.cpus} $bam
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
         minimap2: \$(minimap2 --version 2>&1)
+        samtools: \$(echo \$(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*\$//')
     END_VERSIONS
     """
 
     stub:
     def prefix = task.ext.prefix ?: "${meta.id}.${meta.chunk}${singleton}"
     """
-    touch ${prefix}.sam
+    touch ${prefix}.bam
+    touch ${prefix}.bam.bai
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":

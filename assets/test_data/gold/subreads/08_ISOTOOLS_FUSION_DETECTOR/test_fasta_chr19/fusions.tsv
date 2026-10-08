@@ -1,11 +1,12 @@
-R34@0_chr19__FC0#TC0#PA64#PR65#IY1000#SG	false	1	1	0	0	0	false
-R28@0_chr19__FC0#TC0#PA6#PR31#IY998#SG	false	0	1	0	0	0	false
-R133@0_chr19__FC0#TC1#PA30#PR30#IY999#SG	false	0	1	0	0	0	false
-R76@0_chr19__FC0#TC0#PA26#PR26#IY999#SG	false	1	1	0	0	0	false
-R49@0_chr19__FC0#TC0#PA30#PR30#IY1000#SG	false	1	1	0	0	0	false
-R65@0_chr19__FC0#TC0#PA20#PR30#IY985#SG	false	0	1	0	0	0	false
-R1@0_chr19__FC0#TC0#PA29#PR30#IY999	false	1	1	0	0	0	false
-R60@0_chr19__FC0#TC0#PA10#PR28#IY997#SG	false	0	1	0	0	0	false
-R19@0_chr19__FC0#TC0#PA50#PR51#IY1000#SG	false	1	1	0	0	0	false
-R91@0_chr19__FC0#TC0#PA0#PR21#IY994#SG	false	0	1	0	0	0	false
-R129@0_chr19__FC0#TC0#PA15#PR36#IY995#SG	true	2	1	1	1	0	true
+R31@0_chr19__FC0#TC0#PA6#PR31#IY998	false	0	1	0	0	0	false	false
+R133@0_chr19__FC0#TC0#PA15#PR36#IY995	true	2	1	1	1	0	true	false
+R53@0_chr19__FC0#TC0#PA30#PR30#IY1000	false	1	1	0	0	0	false	false
+R137@0_chr19__FC0#TC1#PA30#PR30#IY999	false	0	1	0	0	0	false	false
+R93@0_chr19__FC0#TC0#PA0#PR21#IY994	false	0	1	0	0	0	false	false
+R68@0_chr19__FC0#TC0#PA20#PR30#IY985	false	0	1	0	0	0	false	false
+R21@0_chr19__FC0#TC0#PA50#PR51#IY1000	false	1	1	0	0	0	false	false
+R122@0_chr19__FC0#TC0#PA29#PR30#IY999	false	1	2	0	0	0	false	false
+R38@0_chr19__FC0#TC0#PA64#PR65#IY1000	false	1	1	0	0	0	false	false
+R78@0_chr19__FC0#TC0#PA26#PR26#IY999	false	1	1	0	0	0	false	false
+R123@0_chr19__FC0#TC0#PA32#PR32#IY995	false	1	2	0	0	0	false	false
+R63@0_chr19__FC0#TC0#PA10#PR28#IY997	false	0	1	0	0	0	false	false

@@ -26,7 +26,8 @@ include { BIGWIGMERGE as BIGTOOLS_BIGWIGMERGE_REVERSE } from '../../modules/cust
 
 workflow PREPOLISH {
     take:
-      reads                  // channel: [ val(meta), [ reads ] ]
+      reads                  // channel: [ val(meta), [ reads ] ] ORF-annotated (APARENT reads their 3' UTRs)
+      evidence               // channel: [ val(meta), [ reads ] ] reads behind the intron frequencies (same meta.id)
       genome                 // Channel.value(path)
       chrom_sizes            // Channel.value(path)
       repeats                // path
@@ -47,7 +48,7 @@ workflow PREPOLISH {
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
-      XLOCI_EXTRACT_INTRONS(ch_genome, reads) // INFO: extract the introns of every read
+      XLOCI_EXTRACT_INTRONS(ch_genome, evidence) // INFO: extract the introns of every read
       IIC_PREDICT_SPLICEOSOME(XLOCI_EXTRACT_INTRONS.out.tsv) // INFO: intronIC U2/U12 scores per intron
 
       // INFO: repeats are optional; [[:], []] keeps the process schedulable without them
@@ -62,7 +63,7 @@ workflow PREPOLISH {
 
       // INFO: two queue channels would pair by arrival order; join by meta.id so each
       // INFO: sample@chromosome BED gets its own intronIC output -> [ meta, reads, iic ]
-      reads
+      evidence
         .map { meta, read -> tuple(meta.id, meta, read) }
         .join(
           IIC_PREDICT_SPLICEOSOME.out.iic

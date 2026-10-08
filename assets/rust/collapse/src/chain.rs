@@ -18,18 +18,22 @@ use std::path::Path;
 use crate::cli::{ChainArgs, Preset};
 use crate::utils::Dsu;
 
+/// An intron with this many reads never moves in junction correction.
+const PROTECT_READS: u32 = 20;
+
 /// Half-open genomic interval (intron or exon).
 type Iv = (u32, u32);
 
 /// Chrom, name, strand (true = +), start, end and introns of a BED12 line.
 type Bed<'a> = (&'a str, &'a str, bool, u32, u32, Vec<Iv>);
 
-const OUTPUTS: [&str; 5] = [
+const OUTPUTS: [&str; 6] = [
     "models.bed",
     "support.tsv",
     "members.tsv",
     "excluded.bed",
     "counts.tsv",
+    "rejected.bed",
 ];
 
 /// A segmented read: its BED12 line and the iso-segment tags the caller uses.
@@ -47,6 +51,8 @@ struct Read<'a> {
     tc: u32,
     iy: u32,
     fg: bool,
+    /// cluster2 singleton (`#SG`)
+    sg: bool,
 }
 
 impl Read<'_> {
@@ -82,6 +88,8 @@ struct Ref {
     starts: Vec<u32>,
     ends: Vec<u32>,
     chains: HashSet<Vec<Iv>>,
+    /// annotated introns, sorted
+    introns: Vec<Iv>,
     /// first intron in transcript orientation -> 5′ ends
     first: HashMap<Iv, Vec<u32>>,
     /// single-exon transcripts, sorted
@@ -118,7 +126,7 @@ impl Model<'_> {
     }
 }
 
-/// Runs `collapse chain`, writing `<prefix>.{models.bed,support.tsv,members.tsv,excluded.bed,counts.tsv}`.
+/// Runs `collapse chain`, writing `<prefix>.{models.bed,support.tsv,members.tsv,excluded.bed,counts.tsv,rejected.bed}`.
 pub fn run(args: ChainArgs) -> Result<(), Box<dyn Error>> {
     // ponytail: inputs are held in memory like `collapse run`; stream per chromosome if a
     // [sample, chr] ever outgrows RAM
@@ -156,7 +164,7 @@ fn chain<W: Write>(
     args: &ChainArgs,
     out: &mut [W],
 ) -> Result<(), Box<dyn Error>> {
-    let [models_w, support_w, members_w, excluded_w, counts_w] = out else {
+    let [models_w, support_w, members_w, excluded_w, counts_w, rejected_w] = out else {
         unreachable!("one writer per output");
     };
 
@@ -182,7 +190,7 @@ fn chain<W: Write>(
             }
             let (chrom, name, plus, start, end, introns) =
                 parse_bed(line).map_err(|e| format!("{path}:{}: {e}", n + 1))?;
-            let (mut pa, mut pr, mut tc, mut iy, mut fg) = (0, 0, 0, 0, false);
+            let (mut pa, mut pr, mut tc, mut iy, mut fg, mut sg) = (0, 0, 0, 0, false, false);
             for tag in name.split_once("__").map_or("", |t| t.1).split('#') {
                 let v = tag.get(2..).and_then(|v| v.parse().ok()).unwrap_or(0);
                 match tag.get(..2) {
@@ -191,6 +199,7 @@ fn chain<W: Write>(
                     Some("TC") => tc = v,
                     Some("IY") => iy = v,
                     Some("FG") => fg = true,
+                    Some("SG") => sg = true,
                     _ => {}
                 }
             }
@@ -208,6 +217,7 @@ fn chain<W: Write>(
                 tc,
                 iy,
                 fg,
+                sg,
             });
         }
     }
@@ -228,6 +238,7 @@ fn chain<W: Write>(
                 r.ends.extend(introns.iter().map(|i| i.1));
                 let (first, five) = if plus { (a, start) } else { (b, end) };
                 r.first.entry(first).or_default().push(five);
+                r.introns.extend(&introns);
                 r.chains.insert(introns);
             }
             _ => r.mono.push((start, end, 0)),
@@ -238,9 +249,14 @@ fn chain<W: Write>(
         r.starts.dedup();
         r.ends.sort_unstable();
         r.ends.dedup();
+        r.introns.sort_unstable();
+        r.introns.dedup();
         r.mono.sort_unstable();
     }
     let none = Ref::default();
+
+    // cluster2 input marks its singletons; without them every read is one molecule
+    let clustered = reads.iter().any(|r| r.sg);
 
     // tail switch (step 7): on when enough of the input reads carry a polyA tail
     let tail_rate = reads.iter().filter(|r| r.tail()).count() as f64 / reads.len().max(1) as f64;
@@ -251,21 +267,24 @@ fn chain<W: Write>(
         buckets.entry((r.chrom, r.plus)).or_default().push(i);
     }
 
-    // 2. junction correction per strand; intron starts and ends are separate site classes
+    // 2. junction correction per strand, by whole intron: a rare intron moves onto a nearby one with
+    // 5x its support, so a minor alternative site (NAGNAG) is judged against its own intron's
+    // neighbours, not against every read sharing the other site, and a corrected chain only ever
+    // carries introns that some read or the reference has
     let (mut sites_moved, mut reads_moved, mut reads_kept) = (0, 0, 0);
     for (key, idx) in &buckets {
         let rf = refs.get(key).unwrap_or(&none);
-        let (mut starts, mut ends) = (HashMap::new(), HashMap::new());
+        let (mut support, mut sites) = (HashMap::new(), (HashMap::new(), HashMap::new()));
         for &i in idx {
-            for &(s, e) in &reads[i].introns {
-                *starts.entry(s).or_insert(0) += 1;
-                *ends.entry(e).or_insert(0) += 1;
+            for &iv in &reads[i].introns {
+                *support.entry(iv).or_insert(0) += 1;
+                *sites.0.entry(iv.0).or_insert(0) += 1;
+                *sites.1.entry(iv.1).or_insert(0) += 1;
             }
         }
-        let w = args.junction_wobble;
-        let (ms, me) = (moves(&starts, &rf.starts, w), moves(&ends, &rf.ends, w));
-        sites_moved += ms.len() + me.len();
-        if ms.is_empty() && me.is_empty() {
+        let mv = moves(&support, &sites, rf, args.junction_wobble);
+        sites_moved += mv.len();
+        if mv.is_empty() {
             continue;
         }
         for &i in idx {
@@ -273,7 +292,7 @@ fn chain<W: Write>(
             let new: Vec<Iv> = r
                 .introns
                 .iter()
-                .map(|&(s, e)| (*ms.get(&s).unwrap_or(&s), *me.get(&e).unwrap_or(&e)))
+                .map(|iv| *mv.get(iv).unwrap_or(iv))
                 .collect();
             if new == r.introns {
                 continue;
@@ -399,6 +418,40 @@ fn chain<W: Write>(
                 m.reason = Some("support");
             } else if tail_on && !m.full.iter().any(|&i| reads[i].tail()) {
                 m.reason = Some("tail");
+            }
+        }
+
+        // 7b. --junction-support: a novel chain resting on one singleton molecule stays only if
+        // every novel intron is also carried by a read outside it (singleton audit: one-read
+        // novel junctions are 18% flagged and 7% non-canonical, independently seen ones are not)
+        if args.junction_support {
+            let mut carried: HashMap<Iv, usize> = HashMap::new();
+            for &i in idx {
+                for &iv in &reads[i].introns {
+                    *carried.entry(iv).or_insert(0) += 1;
+                }
+            }
+            for m in ms.iter_mut() {
+                let own: Vec<&Read> = m
+                    .full
+                    .iter()
+                    .chain(&m.partial)
+                    .map(|&i| &reads[i])
+                    .collect();
+                if m.reason.is_some()
+                    || m.known
+                    || m.mol != 1
+                    || (clustered && !own.iter().all(|r| r.sg))
+                {
+                    continue;
+                }
+                let lone = m.chain.iter().any(|iv| {
+                    rf.introns.binary_search(iv).is_err()
+                        && carried[iv] <= own.iter().filter(|r| r.introns.contains(iv)).count()
+                });
+                if lone {
+                    m.reason = Some("junction");
+                }
             }
         }
 
@@ -568,6 +621,11 @@ fn chain<W: Write>(
     }
     for m in &excl {
         let why = m.reason.unwrap_or_default();
+        if why == "junction" {
+            for &i in m.full.iter().chain(&m.partial) {
+                writeln!(rejected_w, "{}", bed_line(&reads[i], 1))?;
+            }
+        }
         m.full
             .iter()
             .chain(&m.partial)
@@ -606,6 +664,7 @@ fn chain<W: Write>(
         ("excluded_tail", excluded("tail")),
         ("excluded_intronic", excluded("intronic")),
         ("excluded_intraprimed", excluded("intraprimed")),
+        ("excluded_junction", excluded("junction")),
         ("models_out", kept.len()),
     ];
     for (step, v) in steps {
@@ -680,39 +739,72 @@ fn exons(start: u32, introns: &[Iv], end: u32) -> Vec<Iv> {
 /// Junction correction of one site class (intron starts or ends) on one strand: site -> target.
 /// A site moves to an annotated site, or one with >= 5x its reads, within the wobble; a site
 /// holding >= 20% of the reads in its window never moves (NAGNAG), nor does an annotated one.
-fn moves(support: &HashMap<u32, u32>, annotated: &[u32], wobble: u32) -> HashMap<u32, u32> {
-    let mut sites: Vec<(u32, u32)> = support.iter().map(|(&p, &n)| (p, n)).collect();
-    sites.sort_unstable();
-    let ann = |p: u32| annotated.binary_search(&p).is_ok();
-    let mut mv = HashMap::new();
-    for &(p, n) in &sites {
-        if ann(p) {
-            continue;
+fn moves(
+    support: &HashMap<Iv, u32>,
+    (starts, ends): &(HashMap<u32, u32>, HashMap<u32, u32>),
+    rf: &Ref,
+    wobble: u32,
+) -> HashMap<Iv, Iv> {
+    let site = |v: &[u32], p: u32| v.binary_search(&p).is_ok();
+    let ann = |iv: Iv| rf.introns.binary_search(&iv).is_ok();
+    // an annotated intron weighs at least as much as the reads at its weaker site, so a read a few
+    // bp off an annotated intron that no read spans still snaps onto it
+    let weight = |iv: Iv| {
+        let own = support.get(&iv).copied().unwrap_or(0);
+        if !ann(iv) {
+            return own;
         }
-        let (lo, hi) = (p.saturating_sub(wobble), p.saturating_add(wobble));
-        let near =
-            &sites[sites.partition_point(|s| s.0 < lo)..sites.partition_point(|s| s.0 <= hi)];
-        if 5 * n >= near.iter().map(|s| s.1).sum::<u32>() {
-            continue;
-        }
-        let refs = &annotated
-            [annotated.partition_point(|&a| a < lo)..annotated.partition_point(|&a| a <= hi)];
-        // target: annotated, then highest support, then nearest, then lowest coordinate
-        let target = near
+        let at = |m: &HashMap<u32, u32>, p| m.get(&p).copied().unwrap_or(0);
+        own.max(at(starts, iv.0).min(at(ends, iv.1)))
+    };
+    let mut introns: Vec<(Iv, u32)> = support.keys().map(|&iv| (iv, weight(iv))).collect();
+    introns.extend(
+        rf.introns
             .iter()
+            .filter(|iv| !support.contains_key(iv))
+            .map(|&iv| (iv, weight(iv))),
+    );
+    introns.sort_unstable();
+    let near = |a: Iv, b: Iv| a.0.abs_diff(b.0) <= wobble && a.1.abs_diff(b.1) <= wobble;
+    let mut mv = HashMap::new();
+    for &(iv, _) in &introns {
+        let Some(&n) = support.get(&iv) else { continue };
+        // annotated sites never move
+        let (fs, fe) = (site(&rf.starts, iv.0), site(&rf.ends, iv.1));
+        if ann(iv) || fs && fe {
+            continue;
+        }
+        let lo = iv.0.saturating_sub(wobble);
+        let window = introns[introns.partition_point(|x| x.0 .0 < lo)..]
+            .iter()
+            .take_while(|x| x.0 .0 <= iv.0 + wobble)
+            .filter(|x| near(x.0, iv));
+        // an intron with >= 20% of its window's reads, or with PROTECT_READS reads, is protected: at
+        // depth a real minor site (SIRV604, 164 reads) can sit under 20% of a site shared by
+        // several isoforms, while only 1 of 85 SIRV shift artifacts reaches 20 reads
+        if n >= PROTECT_READS || 5 * n >= window.clone().map(|x| x.1).sum::<u32>() {
+            continue;
+        }
+        // target: annotated, then highest support, then nearest, then lowest coordinate; it must
+        // keep any annotated site of the moving intron
+        let target = window
             .copied()
-            .filter(|&(q, m)| q != p && (ann(q) || m >= 5 * n))
-            .chain(
-                refs.iter()
-                    .map(|&q| (q, support.get(&q).copied().unwrap_or(0))),
-            )
-            .min_by_key(|&(q, m)| (!ann(q), Reverse(m), q.abs_diff(p), q));
+            .filter(|&(q, m)| q != iv && (ann(q) || m >= 5 * n))
+            .filter(|&(q, _)| (!fs || q.0 == iv.0) && (!fe || q.1 == iv.1))
+            .min_by_key(|&(q, m)| {
+                (
+                    !ann(q),
+                    Reverse(m),
+                    q.0.abs_diff(iv.0) + q.1.abs_diff(iv.1),
+                    q,
+                )
+            });
         if let Some((q, _)) = target {
-            mv.insert(p, q);
+            mv.insert(iv, q);
         }
     }
     // a target that itself moved: follow it (support strictly grows, so this ends)
-    let keys: Vec<u32> = mv.keys().copied().collect();
+    let keys: Vec<Iv> = mv.keys().copied().collect();
     for p in keys {
         let mut q = mv[&p];
         while let Some(&r) = mv.get(&q) {
@@ -905,7 +997,7 @@ mod tests {
             "chain", "--bed", "a.bed", "--ref", "ref.bed", "--prefix", "t",
         ];
         let args = ChainArgs::parse_from(cli.iter().chain(flags));
-        let mut out = vec![Vec::new(); 5];
+        let mut out = vec![Vec::new(); OUTPUTS.len()];
         chain(
             &[("a.bed".into(), reads)],
             ("ref.bed", reference),
@@ -979,7 +1071,7 @@ mod tests {
              reads_corrected\t3\nreads_correction_skipped\t0\nchains\t10\nchains_absorbed\t2\n\
              models_known\t3\nmodels_novel\t2\nmodels_mono\t0\nexcluded_support\t3\n\
              excluded_fraction\t3\nexcluded_tail\t2\nexcluded_intronic\t1\n\
-             excluded_intraprimed\t10\nmodels_out\t5\ntail_rate\t0.7647\n"
+             excluded_intraprimed\t10\nexcluded_junction\t0\nmodels_out\t5\ntail_rate\t0.7647\n"
         );
         let fate: HashMap<&str, &str> = o[2]
             .lines()
@@ -1073,7 +1165,7 @@ mod tests {
         assert_eq!(
             tail,
             "models_known\t3 models_novel\t6 models_mono\t1 excluded_support\t0 excluded_fraction\t0 \
-             excluded_tail\t0 excluded_intronic\t1 excluded_intraprimed\t0 models_out\t10 tail_rate\t0.7647"
+             excluded_tail\t0 excluded_intronic\t1 excluded_intraprimed\t0 excluded_junction\t0 models_out\t10 tail_rate\t0.7647"
         );
     }
 
@@ -1106,5 +1198,59 @@ mod tests {
             .collect();
         let o = call(&ends, "", &[]).unwrap();
         assert!(o[0].starts_with("chr1\t100\t600\tm1__"), "{}", o[0]);
+        // NAGNAG (SIRV604/612): acceptor 403 has 2 of 3 reads at its own intron, but acceptor 400 is
+        // also used by 10 reads of another donor; site-level wobble moved 403, intron-level keeps it
+        let mut ng = String::new();
+        for (i, (a, n)) in [(400, 1), (403, 2)].iter().enumerate() {
+            for j in 0..*n {
+                ng += &bed(
+                    &format!("g{i}{j}"),
+                    '+',
+                    &[(100 + j, 200), (*a, 600)],
+                    "PA30#PR30#IY990",
+                );
+            }
+        }
+        for j in 0..10 {
+            ng += &bed(
+                &format!("h{j}"),
+                '+',
+                &[(100 + j, 300), (400, 600)],
+                "PA30#PR30#IY990",
+            );
+        }
+        let o = call(&ng, "", &[]).unwrap();
+        assert!(o[4].contains("sites_corrected\t0\n"), "{}", o[4]);
+        assert!(o[0].contains("\t2\t100,197\t0,303\n"), "{}", o[0]); // its own 2-read model
+    }
+
+    #[test]
+    fn junction_support() {
+        // cluster2 input: s0 is a singleton with novel introns no other read has, s1 a singleton
+        // whose intron cluster h1 also carries, h0 a cluster (no #SG) with a unique intron
+        let (t, sg) = ("PA30#PR30#IY990", "PA30#PR30#IY990#SG");
+        let r = bed("s0", '+', &[(100, 200), (1000, 1100), (2000, 2100)], sg)
+            + &bed("s1", '+', &[(5050, 5100), (5300, 5500)], sg)
+            + &bed("h1", '+', &[(5000, 5100), (5300, 5400), (5600, 5700)], t)
+            + &bed("h0", '+', &[(8000, 8100), (8300, 8400)], t);
+        let names = |o: &str| {
+            o.lines()
+                .map(|l| l.split('\t').nth(3).unwrap()[..2].to_string())
+                .collect::<Vec<_>>()
+        };
+        let o = call(&r, "", &["--preset", "sensitive"]).unwrap();
+        assert_eq!(
+            (names(&o[0]), o[5].as_str()),
+            (vec!["s0".into(), "h1".into(), "s1".into(), "h0".into()], "")
+        );
+        let o = call(&r, "", &["--preset", "sensitive", "--junction-support"]).unwrap();
+        assert_eq!(
+            (names(&o[0]), names(&o[5])),
+            (
+                vec!["h1".into(), "s1".into(), "h0".into()],
+                vec!["s0".into()]
+            )
+        );
+        assert!(o[4].contains("excluded_junction\t1\n"), "{}", o[4]);
     }
 }

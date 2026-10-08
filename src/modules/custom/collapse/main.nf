@@ -5,7 +5,7 @@ process COLLAPSE {
     conda "${moduleDir}/environment.yml"
     container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
         '' :
-        'ghcr.io/alejandrogzi/isox-rs:v2.1.0' }"
+        'ghcr.io/alejandrogzi/isox-rs:latest' }"
 
     input:
     tuple val(meta), path(bed)

@@ -6,6 +6,7 @@
 
 include { FASTX_INSPECT } from '../../modules/custom/isotools/fastx/inspect/main.nf'
 include { FASTX_ORIENT } from '../../modules/custom/isotools/fastx/orient/main.nf'
+include { FASTX_RENAME } from '../../modules/custom/fastx/rename/main.nf'
 include { LIMA as LIMA_FASTX } from '../../modules/nf-core/lima/main.nf'
 include { FASTX_CONCAT as FASTX_CONCAT_LIMA } from '../../modules/custom/fastx/concat/main.nf'
 
@@ -91,9 +92,13 @@ workflow FASTX_PREPARE {
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
+      // INFO: lima hangs on non-PacBio read names (SRA's SRRxxx.N), so raw CCS files get CCS names first
+      FASTX_RENAME(ch_routed.ccs.map { meta, fastx, row -> [ meta, fastx ] })
+      ch_versions = ch_versions.mix(FASTX_RENAME.out.versions)
+
       // INFO: user primers win; otherwise the kit iso-fastx detected picks a bundled primer set
-      ch_routed.ccs
-          .map { meta, fastx, row ->
+      FASTX_RENAME.out.reads
+          .map { meta, fastx ->
               [ meta, fastx, user_primers ?: file("${moduleDir}/../../../assets/primers/${meta.kit}.fasta", checkIfExists: true) ]
           }
           .multiMap { meta, fastx, kit_primers ->

@@ -36,6 +36,8 @@ if name == 'pbindex':
 elif name == 'lima':
     fastx = args[0].endswith('.fastq.gz')  # LIMA_FASTX: FASTQ in, one FASTQ per primer pair out
     assert fastx or Path(args[0] + '.pbi').is_file()
+    # lima 26.2.1 hangs on non-PacBio read names, so FASTX_RENAME must have given CCS names
+    assert not fastx or gzip.open(args[0], 'rt').readline().split()[0].endswith('/ccs'), args[0]
     stem = args[2].removesuffix('.fastq.gz' if fastx else '.bam')
     for pair in pairs:
         if fastx:
@@ -88,7 +90,7 @@ elif name == 'fxsplit':
     Path('chunks').mkdir()
     shutil.copyfile(option('-f'), f"chunks/tmp_chunk_0_{option('--suffix')}.fasta.gz")
 elif name == 'minimap2':
-    Path(option('-o')).write_text(sam)
+    print(sam, end='')  # INFO: piped into samtools sort
 elif name == 'iso-cigar':
     stem = option('--bam').removesuffix('.bam')
     Path(stem + '.extended.bam').touch()
@@ -108,7 +110,7 @@ elif name == 'iso-fusion':
 else:
     raise AssertionError((name, args))
 with open(os.environ['TEST_CALLS'], 'a') as log:
-    log.write(json.dumps([name, args]) + '\n')
+    log.write(json.dumps([name, args, os.getcwd()]) + '\n')
 '''
 
 
@@ -254,28 +256,30 @@ workflow {
                     for path in hits:
                         assert gzip.decompress(path.read_bytes()) == gzip.decompress(want), (path, mode)
         records = [json.loads(line) for line in calls.read_text().splitlines()]
-        refine = [args for name, args in records if name == "isoseq" and args[0] == "refine"]
-        cluster = [args for name, args in records if name == "isoseq" and args[0] == "cluster2"]
+        refine = [args for name, args, *_ in records if name == "isoseq" and args[0] == "refine"]
+        cluster = [args for name, args, *_ in records if name == "isoseq" and args[0] == "cluster2"]
         assert len(refine) == (len(pairs) if entrypoint in ("refine", "ccs") else 0), refine
         assert len(cluster) == (len(expected) if entrypoint != "flnc" and engine == "isoseq" else 0), cluster
-        assert sum(name == "lima" for name, _ in records) == (entrypoint == "ccs")
-        assert sum(name == "pbindex" for name, _ in records) == (
+        assert sum(name == "lima" for name, *_ in records) == (entrypoint == "ccs")
+        assert sum(name == "pbindex" for name, *_ in records) == (
             (entrypoint == "refine" or (entrypoint == "cluster" and engine == "isoseq")) and len(pairs) > 1)
-        to_fasta = [args for name, args in records if name == "samtools" and args[0] == "fasta" and "-0" in args]
+        to_fasta = [args for name, args, *_ in records if name == "samtools" and args[0] == "fasta" and "-0" in args]
         # Engine none converts every refined BAM to FASTA once, also in 'both'.
         assert len(to_fasta) == (len(pairs) if engine == "none" else 0), to_fasta
         # collapse chain runs once per result group (the stub fusion detector emits free reads only);
         # cluster2 records are clustered, so they keep every chain (sensitive preset).
-        chains = [args for name, args in records if name == "collapse" and args[0] == "chain"]
+        chains = [args for name, args, *_ in records if name == "collapse" and args[0] == "chain"]
         assert len(chains) == len(expected), chains
         presets = {args[args.index("--preset") + 1] for args in chains}
         assert presets == ({"sensitive"} if entrypoint != "flnc" and engine == "isoseq" else {"balanced"}), presets
-        assert not any(name == "samtools" and args[0] == "merge" for name, args in records), records
+        assert not any(name == "samtools" and args[0] == "merge" for name, args, *_ in records), records
         # Every result id has one hq and one singleton chunk (only hq with engine none). With the second pass on, iso-align runs once per
-        # chunk BAM with exactly the chunk FASTA minimap2 aligned it from (reads name -> SAM name).
-        chunks = {args[-3]: args[-1].removesuffix(".sam") for name, args in records if name == "minimap2"}
+        # chunk BAM with exactly the chunk FASTA minimap2 aligned it from (reads name -> BAM name).
+        # INFO: minimap2 pipes into samtools sort in the same task directory: pair them by it
+        sorted_bams = {cwd: args[args.index("-o") + 1] for name, args, cwd in records if name == "samtools" and args[0] == "sort"}
+        chunks = {args[-1]: sorted_bams[cwd].removesuffix(".bam") for name, args, cwd in records if name == "minimap2"}
         found = sorted((args[args.index("--bam") + 1], args[args.index("--reads") + 1])
-                       for name, args in records if name == "iso-align")
+                       for name, args, *_ in records if name == "iso-align")
         suffix = ".extended.bam" if cigar else ".bam"
         assert len(chunks) == (1 if engine == "none" else 2) * len(expected), chunks  # none: no singleton class
         assert found == (sorted((sam + suffix, reads) for reads, sam in chunks.items()) if cigar is not None else []), (found, chunks)
@@ -313,11 +317,11 @@ workflow {
                             stderr=subprocess.STDOUT, timeout=120)
     assert result.returncode == 0, result.stdout
     records = [json.loads(line) for line in calls.read_text().splitlines()]
-    assert [Path(a[0]).name for n, a in records if n == "lima"] == ["s1.ccs.fastq.gz"], records
-    assert [Path(a[a.index("--fastx") + 1]).name for n, a in records if n == "iso-fastx" and a[0] == "orient"] == \
+    assert [Path(a[0]).name for n, a, *_ in records if n == "lima"] == ["s1.ccs.fastq.ccs_names.fastq.gz"], records
+    assert [Path(a[a.index("--fastx") + 1]).name for n, a, *_ in records if n == "iso-fastx" and a[0] == "orient"] == \
         ["s2.mixed.fastq.gz"], records
     presets = {a[a.index("--prefix") + 1].split(".chr1")[0]: a[a.index("--preset") + 1]
-               for n, a in records if n == "collapse"}
+               for n, a, *_ in records if n == "collapse"}
     assert presets == {"s1.ccs": "balanced", "s2.mixed": "balanced", "s3.clustered": "sensitive", "s4": "balanced"}, presets
     (case / "s5.subreads.fastq.gz").write_bytes(gzip.compress(b"@s5/0\nACGT\n+\nIIII\n"))
     result = subprocess.run(base + [str(harness), "--entrypoint", "flnc", "--global_input_dir", str(case),

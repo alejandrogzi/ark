@@ -711,6 +711,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
         for component in components.iter() {
             let (component_start, component_end) = component_bounds(component);
+            // INFO: the downstream flank runs past the end of short contigs (ERCC, scaffolds); clip it
+            let component_end = component_end.min(sequence.len() as u64);
             let strand = component[0].strand().unwrap_or_else(|| {
                 log::error!("BED12 record {} does not have a strand", component[0]);
                 std::process::exit(1);
@@ -1201,6 +1203,42 @@ mod tests {
         assert!(records.iter().all(|(_, start, end, _, seq)| {
             (*end - *start) >= MIN_INTERVAL_SIZE as u64 && seq.len() == (*end - *start) as usize
         }));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn run_clips_flank_at_contig_end() {
+        let dir = temp_dir("contig-end");
+        let bed = dir.join("input.bed");
+        let genome = dir.join("genome.fa");
+        let output = dir.join("output.tsv");
+
+        write_text_file(
+            &bed,
+            "chr1\t100\t200\ttx1\t0\t+\t110\t150\t0,0,0\t1\t100,\t0,\n",
+        );
+        write_text_file(&genome, &format!(">chr1\n{}\n", "ACGTTGCA".repeat(25)));
+
+        run(Args {
+            bed,
+            genome,
+            upstream: 10,
+            downstream: 10,
+            output: output.clone(),
+            chunks: None,
+            prefix: "part".to_string(),
+            gz: false,
+            threads: 1,
+            level: log::Level::Error,
+            max_interval_size: 500,
+        })
+        .unwrap();
+
+        let records = read_output_records(&output);
+        assert_eq!(records.len(), 1);
+        assert_eq!((records[0].1, records[0].2), (140, 200));
+        assert_eq!(records[0].4.len(), 60);
 
         fs::remove_dir_all(dir).unwrap();
     }

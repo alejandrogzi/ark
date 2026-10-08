@@ -14,7 +14,7 @@ process FASTX_INSPECT {
     tag "$meta.id"
     label 'process_single'
 
-    container 'ghcr.io/alejandrogzi/isotools:v0.0.45'
+    container 'ghcr.io/alejandrogzi/isotools:latest'
 
     input:
     tuple val(meta), path(fastx)
