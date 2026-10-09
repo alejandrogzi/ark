@@ -55,7 +55,7 @@
 
 # Changelog
 
-## [v2.1.3] - unreleased
+## [v2.1.3] - 2026-10-09
 
 - **minimap2 now gets `--cs=<tag>` instead of `-cs <tag>`.** `-cs long` is parsed as `-c -s long` (peak DP score 0, no `cs:Z` tag), so pass 1 and the fragment pass reported low-scoring split alignments that should have been dropped. Both `MINIMAP2_ALIGN` blocks now pass `--cs=${params.minimap2_align_cigar_tag}`.
 - **Veredict buckets are exclusive (veredict 0.0.9).** RT routing takes precedence over every other bucket and artifact routing over flaw-based bucketing, so each row lands in exactly one bucket. Before, the artifact mask was recomputed from the unfiltered schema and discarded the RT exclusion, so RT models leaked into the flaw buckets.
@@ -63,7 +63,7 @@
 - **`-resume` no longer skips POLISH after APARENT.** `APARENT_PREDICT` bedGraphs are mandatory outputs now, and a chunk with no signal on one strand still emits an (empty) file. `BEDGRAPHTOBIGWIG` deletes the bedGraph at its real path when `bigtools_keep_bedgraph` is false, so on `-resume` Nextflow saw the output missing and reran APARENT instead of emitting nothing; empty bedGraphs now produce no bigWig (`bigwig` output is optional).
 - **`BEDTOBIGBED` passes `-p no`.** bigtools 0.5.6 binary-searches chromosome boundaries once a BED is >= 200 MB, skips a short chromosome between two long ones, then panics with "File is not sorted". Reading in order avoids it.
 
-## [v2.1.2] - unreleased
+## [v2.1.2] - 2026-10-08
 
 - **`PBCCS` uses its task directory as `TMPDIR`.** ccs names its temp files `thread.<i>_<j>.<chunk>.bam`, so two runs sharing a `TMPDIR` (e.g. a lab-wide scratch) overwrote each other's files and failed. Seen with two giraffe runs on the same subreads.
 - **CI gold regenerated with the published v2.1.1 images.** The v2.1.1 gold came from collapse 0.1.0 and the old intron tables, so `master` CI failed on `flnc`.
