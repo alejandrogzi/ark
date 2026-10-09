@@ -12,7 +12,7 @@ process BEDGRAPHTOBIGWIG {
     path chrom_sizes
 
     output:
-    tuple val(meta), path("*.bw"), emit: bigwig
+    tuple val(meta), path("*.bw"), optional: true, emit: bigwig
     path "versions.yml"          , emit: versions
 
     when:
@@ -22,11 +22,14 @@ process BEDGRAPHTOBIGWIG {
     def args = task.ext.args ?: ''
     def prefix = task.ext.prefix ?: bedgraph.baseName
     """
-    bigtools bedgraphtobigwig \\
-        $args \\
-        $bedgraph \\
-        $chrom_sizes \\
-        ${prefix}.bw
+    # INFO: empty bedGraphs (no signal on this strand) produce no bigWig
+    if [ -s ${bedgraph} ]; then
+        bigtools bedgraphtobigwig \\
+            $args \\
+            $bedgraph \\
+            $chrom_sizes \\
+            ${prefix}.bw
+    fi
 
     if [ ${params.bigtools_keep_bedgraph} == false ]; then
       if [ -L ${bedgraph} ]; then

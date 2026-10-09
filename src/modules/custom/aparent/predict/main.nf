@@ -13,8 +13,8 @@ process APARENT_PREDICT {
 
     output:
     tuple val(meta), path("aparent/*.aparent.bed")          , optional: true, emit: bed
-    tuple val(meta), path("aparent/*.aparent.forward.bg")   , optional: true, emit: bg_forward
-    tuple val(meta), path("aparent/*.aparent.reverse.bg")   , optional: true, emit: bg_reverse
+    tuple val(meta), path("aparent/*.aparent.forward.bg")   , emit: bg_forward
+    tuple val(meta), path("aparent/*.aparent.reverse.bg")   , emit: bg_reverse
     path "versions.yml"                                     , emit: versions
 
     when:
@@ -31,6 +31,13 @@ process APARENT_PREDICT {
         --prefix $prefix \\
         --model $weights
 
+    # INFO: bedGraphs are mandatory outputs, so a chunk with no signal on one
+    # INFO: strand still emits an (empty) file. BEDGRAPHTOBIGWIG deletes the
+    # INFO: bedGraph at its real path; on -resume Nextflow then sees the output
+    # INFO: missing and reruns this task instead of emitting nothing.
+    mkdir -p aparent
+    touch aparent/${prefix}.aparent.forward.bg aparent/${prefix}.aparent.reverse.bg
+
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
         aparent: \$(aparent --version 2>&1 | sed 's/aparent //')
@@ -41,9 +48,9 @@ process APARENT_PREDICT {
     def prefix = task.ext.prefix ?: "${meta.id}.${meta.chunk}"
     """
     mkdir -p aparent
-    touch aparent/${prefix}.aparent.forward.bed 
-    touch aparent/${prefix}.aparent.reverse.bed
-    touch aparent/${prefix}.aparent.bg
+    touch aparent/${prefix}.aparent.bed
+    touch aparent/${prefix}.aparent.forward.bg
+    touch aparent/${prefix}.aparent.reverse.bg
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
