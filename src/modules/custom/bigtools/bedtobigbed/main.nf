@@ -23,8 +23,12 @@ process BEDTOBIGBED {
     def args = task.ext.args ?: ''
     def prefix = task.ext.prefix ?: "${meta.id}"
     def as = autosql ? "--autosql $autosql" : ''
+    // bigtools 0.5.6 binary-searches chromosome boundaries once a BED is
+    // >= 200 MB. A short chromosome between two long ones is skipped, then
+    // the writer reports "File is not sorted" and panics. -p no reads in order.
     """
     bigtools bedtobigbed \\
+        -p no \\
         $args \\
         $as \\
         $bed \\
