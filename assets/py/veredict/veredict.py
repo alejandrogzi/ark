@@ -5,7 +5,7 @@ from __future__ import annotations
 __author__ = "Alejandro Gonzales-Irribarren"
 __email__ = "alejandrxgzi@gmail.com"
 __github__ = "https://github.com/alejandrogzi"
-__version__ = "0.0.8"
+__version__ = "0.0.9"
 
 import argparse
 import logging
@@ -759,13 +759,13 @@ def bucket_rows(schema: pd.DataFrame, flaws: int) -> Dict[str, pd.DataFrame]:
     ['rt', 'pass', 'trash', 'retentions', 'truncations', 'intraprimming']
     """
 
-    # RT routing takes precedence over flaw-based bucketing.
+    # RT routing takes precedence over every other bucket, artifact routing over
+    # flaw-based bucketing; each row lands in exactly one bucket.
     rt_mask = schema["R_code"].str.contains("X", regex=False, na=False)
-    remaining_schema = schema.loc[~rt_mask].copy()
-
-    # Artifact routing takes precedence over flaw-based bucketing.
-    artifact_mask = schema["R_code"].str.contains("Q", regex=False, na=False)
-    remaining_schema = schema.loc[~artifact_mask].copy()
+    artifact_mask = (
+        schema["R_code"].str.contains("Q", regex=False, na=False) & ~rt_mask
+    )
+    remaining_schema = schema.loc[~(rt_mask | artifact_mask)].copy()
 
     status_columns = [spec.status_column for spec in STATUS_INPUT_SPECS]
     status_frame = remaining_schema.loc[:, status_columns].copy()

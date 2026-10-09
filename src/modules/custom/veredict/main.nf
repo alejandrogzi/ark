@@ -17,6 +17,7 @@ process VEREDICT {
     tuple val(meta), path("veredict/*.truncations.bed")   , optional: true, emit: truncations
     tuple val(meta), path("veredict/*.intraprimming.bed") , optional: true, emit: intraprimming
     tuple val(meta), path("veredict/*.rt.bed")            , optional: true, emit: rt
+    tuple val(meta), path("veredict/*.artifacts.bed")     , optional: true, emit: artifacts
     env(ADDITIONAL_BED_COLUMNS)                                           , emit: additional_bed_columns
     path "versions.yml"                                                   , emit: versions
 
@@ -54,6 +55,7 @@ process VEREDICT {
     touch veredict/${prefix}.truncations.bed
     touch veredict/${prefix}.intraprimming.bed
     touch veredict/${prefix}.rt.bed
+    touch veredict/${prefix}.artifacts.bed
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
