@@ -16,6 +16,7 @@ include { GAWK_JOIN as JOIN_VEREDICT_RETENTIONS } from '../../modules/custom/gaw
 include { GAWK_JOIN as JOIN_VEREDICT_TRUNCATIONS } from '../../modules/custom/gawk/join/main.nf'
 include { GAWK_JOIN as JOIN_VEREDICT_INTRAPRIMMING } from '../../modules/custom/gawk/join/main.nf'
 include { GAWK_JOIN as JOIN_VEREDICT_RT } from '../../modules/custom/gawk/join/main.nf'
+include { GAWK_JOIN as JOIN_VEREDICT_ARTIFACTS } from '../../modules/custom/gawk/join/main.nf'
 
 include { BEDTOBIGBED as BEDTOBIGBED_PASSES } from '../../modules/custom/bigtools/bedtobigbed/main.nf'
 include { BEDTOBIGBED as BEDTOBIGBED_TRASH } from '../../modules/custom/bigtools/bedtobigbed/main.nf'
@@ -25,6 +26,7 @@ include { BEDTOBIGBED as BEDTOBIGBED_INTRAPRIMMING } from '../../modules/custom/
 include { BEDTOBIGBED as BEDTOBIGBED_DUPLICATES } from '../../modules/custom/bigtools/bedtobigbed/main.nf'
 include { BEDTOBIGBED as BEDTOBIGBED_SCRAPS } from '../../modules/custom/bigtools/bedtobigbed/main.nf'
 include { BEDTOBIGBED as BEDTOBIGBED_RT } from '../../modules/custom/bigtools/bedtobigbed/main.nf'
+include { BEDTOBIGBED as BEDTOBIGBED_ARTIFACTS } from '../../modules/custom/bigtools/bedtobigbed/main.nf'
 
 include { PUBLISH as PUBLISH_BIGBEDS } from '../../modules/custom/publish/main.nf'
 
@@ -33,6 +35,7 @@ include { DETACH_DUPLICATES as DETACH_RETENTION_DUPLICATES } from '../../modules
 include { DETACH_DUPLICATES as DETACH_TRUNCATION_DUPLICATES } from '../../modules/custom/detach/main.nf'
 include { DETACH_DUPLICATES as DETACH_INTRAPRIMMING_DUPLICATES } from '../../modules/custom/detach/main.nf'
 include { DETACH_DUPLICATES as DETACH_RT_DUPLICATES } from '../../modules/custom/detach/main.nf'
+include { DETACH_DUPLICATES as DETACH_ARTIFACT_DUPLICATES } from '../../modules/custom/detach/main.nf'
 include { DETACH_DUPLICATES as DETACH_ORPHANS_DUPLICATES } from '../../modules/custom/detach/main.nf'
 include { DETACH_DUPLICATES as DETACH_TRASH_DUPLICATES } from '../../modules/custom/detach/main.nf'
 
@@ -83,7 +86,7 @@ workflow POLISH {
 
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-          VEREDICT [ PASS, TRASH, RETENTIONS, TRUNCATIONS, INTRAPRIMING, RT ]
+          VEREDICT [ PASS, TRASH, RETENTIONS, TRUNCATIONS, INTRAPRIMING, RT, ARTIFACTS ]
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
@@ -182,6 +185,17 @@ workflow POLISH {
       DETACH_RT_DUPLICATES(JOIN_VEREDICT_RT.out.output)
       BEDTOBIGBED_RT(DETACH_RT_DUPLICATES.out.pass, chrom_sizes, autosql)
 
+      ISOTOOLS_PLUGIN_VEREDICT.out.artifacts
+          .map { meta, artifacts -> [ meta.name, meta, artifacts ] }
+          .groupTuple()
+          .map { name, metas, files ->
+               [ [ id: name + '.artifacts', name: name ], files ]
+          }
+          .set { ch_artifacts }
+      JOIN_VEREDICT_ARTIFACTS(ch_artifacts, 'bed')
+      DETACH_ARTIFACT_DUPLICATES(JOIN_VEREDICT_ARTIFACTS.out.output)
+      BEDTOBIGBED_ARTIFACTS(DETACH_ARTIFACT_DUPLICATES.out.pass, chrom_sizes, autosql)
+
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
           PUBLISH BIGBEDS
@@ -198,6 +212,7 @@ workflow POLISH {
       ch_bbs = ch_bbs.mix(BEDTOBIGBED_TRUNCATIONS.out.bigbed)
       ch_bbs = ch_bbs.mix(BEDTOBIGBED_INTRAPRIMMING.out.bigbed)
       ch_bbs = ch_bbs.mix(BEDTOBIGBED_RT.out.bigbed)
+      ch_bbs = ch_bbs.mix(BEDTOBIGBED_ARTIFACTS.out.bigbed)
 
       ch_bbs.map { meta, file -> [meta.name, meta, file] }
          .groupTuple()
@@ -214,6 +229,7 @@ workflow POLISH {
       truncations           = BEDTOBIGBED_TRUNCATIONS.out.bigbed
       intraprimming         = BEDTOBIGBED_INTRAPRIMMING.out.bigbed
       rt                    = BEDTOBIGBED_RT.out.bigbed
+      artifacts             = BEDTOBIGBED_ARTIFACTS.out.bigbed
       bigbeds               = ch_bbs
       additional_columns    = ISOTOOLS_PLUGIN_VEREDICT.out.additional_bed_columns
       sample                = ch_bbs.map { meta, file -> meta.id }
