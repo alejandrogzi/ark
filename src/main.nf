@@ -69,12 +69,23 @@ def validateFullRun() {
       problems << 'ERROR: Unknown aligner option -> options are: mm2, ultra, desalt, pbmm2, flair, ark'
     }
 
+    if (!(params.minimap2_align_splicing_algorithm in ['spliceai', 'minisplice'])) {
+      problems << 'ERROR: Unknown minimap2_align_splicing_algorithm option -> options are: spliceai, minisplice'
+    }
+    if (!(params.splice_model in ['spliceai', 'splicetransformer'])) {
+      problems << 'ERROR: Unknown splice_model option -> options are: spliceai, splicetransformer'
+    }
+
     if (problems) {
         error "Parameter validation failed:\n  - " + problems.join('\n  - ')
         System.exit(1)
     }
     if (params.reconstruct_engine == 'none') {
       log.warn 'reconstruct_engine none: every segmented read reaches ORF prediction'
+    }
+    // INFO: precomputed derived scores skip the per-base model entirely, whichever splice_model is set
+    if (params.minimap2_align_splicing_algorithm == 'spliceai' && params.splice_model == 'splicetransformer' && params.spliceai_scores_path) {
+      log.warn 'splice_model splicetransformer: spliceai_scores_path is set, so those precomputed scores are used and SpliceTransformer is not run'
     }
 }
 

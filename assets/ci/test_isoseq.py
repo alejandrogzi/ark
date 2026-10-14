@@ -23,6 +23,9 @@ name, args = Path(sys.argv[0]).name, sys.argv[1:]
 if '--version' in args:
     print(name + ' ' + (' '.join(args[:-1]) + ' ' if name == 'isoseq' else '') + 'test')
     sys.exit(0)
+if name == 'iso-align' and args == ['--help']:
+    print('--bam --realigned-bam --rules')
+    sys.exit(0)
 pairs = json.loads(os.environ['TEST_PRIMER_PAIRS'])
 sam = '@HD\tVN:1.6\n' + ''.join(f'r{i}\t4\t*\t0\t0\t*\t*\t0\t0\tACGT\t*\tis:i:{i}\n' for i in (1, 2))
 def outputs(bam):
@@ -57,12 +60,20 @@ elif name == 'isoseq' and args[0] == 'cluster2':
     outputs(args[2])
     Path(args[2].removesuffix('.bam') + '.cluster_report.csv').touch()
 elif name == 'samtools':
-    if args[0] == 'view' and '-bo' in args:
+    if args[0] == 'view' and '-N' in args:
+        # SAMTOOLS_SELECT_READS: keep (-o) or drop (-U) the named reads; the stub copies the input
+        assert Path(option('-N')).is_file() and Path(args[-1]).is_file(), args
+        shutil.copyfile(args[-1], option('-U') if '-U' in args else option('-o'))
+    elif args[0] == 'view' and '-c' in args:
+        print(1)
+    elif args[0] == 'view' and '-bo' in args:
         Path(option('-bo')).write_text(sys.stdin.read())
     elif args[0] == 'view':
         print(sam, end='')
     elif args[0] == 'sort':
-        Path(option('-o')).write_text(sys.stdin.read())
+        # minimap2 pipes into sort (stdin); SAMTOOLS_SELECT_READS sorts a file argument
+        source = args[-1] if args[-1].endswith('.bam') and args[-1] != option('-o') else None
+        Path(option('-o')).write_text(Path(source).read_text() if source else sys.stdin.read())
     elif args[0] == 'index':
         Path(args[-1] + '.bai').touch()
     elif args[0] == 'fasta' and '-0' in args:
@@ -89,16 +100,24 @@ elif name == 'fxsplit':
     # Real chunk names carry the --suffix (meta.id), so every chunk FASTA has a distinct staged name.
     Path('chunks').mkdir()
     shutil.copyfile(option('-f'), f"chunks/tmp_chunk_0_{option('--suffix')}.fasta.gz")
+    if os.environ.get('TEST_TWO_CHUNKS'):  # pooled fragment re-alignment needs several chunks per sample
+        shutil.copyfile(option('-f'), f"chunks/tmp_chunk_1_{option('--suffix')}.fasta.gz")
 elif name == 'minimap2':
     print(sam, end='')  # INFO: piped into samtools sort
 elif name == 'iso-cigar':
     stem = option('--bam').removesuffix('.bam')
     Path(stem + '.extended.bam').touch()
     Path(stem + '.extended.bam.bai').touch()
+elif name == 'iso-align' and '--realigned-bam' in args:
+    assert Path(option('--bam')).is_file() and Path(option('--realigned-bam')).is_file(), args
+    Path(option('--report')).touch()
+    # singleton chunks accept nothing: their base BAM must skip the drop step and they emit no fragments BAM
+    Path(option('--output')).write_text('' if '.singleton.' in option('--output') else 'r1\n')
 elif name == 'iso-align':
     assert all(Path(path).is_file() for path in [option('--bam')] + option('--reads').split(',')), args
     Path(option('--report')).touch()
-    Path(option('--output')).touch()  # empty: the module deletes it, so no fragment re-alignment
+    # empty unless TEST_FRAGMENTS: the module deletes an empty FASTA, so no fragment re-alignment
+    Path(option('--output')).write_text('>r1\nACGT\n' if os.environ.get('TEST_FRAGMENTS') else '')
 elif name == 'iso-segment':
     Path('chr1@' + option('--prefix') + '.hq.bed').write_text('chr1\t0\t4\tr1\n')
 elif name == 'iso-fusion':
@@ -107,6 +126,26 @@ elif name == 'iso-fusion':
     directory = Path(option('--prefix'))
     directory.mkdir()
     (directory / 'fusions.free.bed').write_text('chr1\t0\t4\tr1\n')
+elif name in ('splicetransformer', 'spliceai') and args[0] == 'chunk':
+    # one chunk per contig of genome.fa, chunk numbers restarting per contig (real chunker layout)
+    Path('chunks').mkdir()
+    gz = '--gzip' in args
+    for contig in ('chrA', 'chrB'):
+        Path(f"chunks/tmp.{contig}.chunk.0.fa{'.gz' if gz else ''}").touch()
+elif name in ('splicetransformer', 'spliceai') and args[0] == 'predict':
+    outdir, stem = Path(option('--outdir')), Path(option('--sequence')).name.split('.fa')[0]
+    outdir.mkdir()
+    for track in ('donor_plus', 'donor_minus', 'acceptor_plus', 'acceptor_minus'):
+        (outdir / f'{stem}.{track}.wig').write_text(f'{stem}\n')
+elif name == 'wigToBigWig':
+    shutil.copyfile(args[-3], args[-1])
+elif name == 'bigtools' and args[0] == 'bigwigmerge':
+    Path(args[-1]).write_text(''.join(Path(bw).read_text() for bw in args[1:-1]))
+elif name == 'splicing':
+    tracks = sorted(path.name for path in Path(option('--bigwig-dir')).iterdir())
+    assert len(tracks) == 4 and all(any(site in t for site in ('donor', 'acceptor')) and any(strand in t for strand in ('plus', 'minus'))
+                                    for t in tracks), tracks
+    Path(option('--prefix') + '.derived.tsv').touch()
 else:
     raise AssertionError((name, args))
 with open(os.environ['TEST_CALLS'], 'a') as log:
@@ -119,12 +158,13 @@ with tempfile.TemporaryDirectory(prefix="ark-isoseq-") as temporary:
     binary = temporary / "bin"
     binary.mkdir()
     for name in ("pbindex", "lima", "isoseq", "samtools", "iso-fastx", "collapse", "fxsplit", "minimap2", "iso-cigar",
-                 "iso-align", "iso-segment", "iso-fusion"):
+                 "iso-align", "iso-segment", "iso-fusion", "splicetransformer", "spliceai", "wigToBigWig", "bigtools",
+                 "splicing"):
         executable = binary / name
         executable.write_text(TOOLS)
         executable.chmod(0o755)
     # Cigar extension stages genome and annotation side by side, so they need distinct names.
-    for name in ("genome.fa", "genome.mmi", "annotation.bed"):
+    for name in ("genome.fa", "genome.mmi", "annotation.bed", "chrom.sizes", "SpTransformer_pytorch.ckpt"):
         (temporary / name).touch()
 
     config = temporary / "test.config"
@@ -143,7 +183,13 @@ singularity.enabled = false
 conda.enabled = false
 params.aligner = 'mm2'
 params.cigar = false
+params.accept = false
+params.pool = false
 params.cluster_engine = 'isoseq'
+params.test_bigwigs = null
+params.test_algorithm = 'spliceai'
+params.test_scores = null
+params.test_weights = null
 """)
     # The second pass runs only for the ark cases (--aligner ark); --cigar toggles cigar extension there.
     harness = temporary / "main.nf"
@@ -164,8 +210,8 @@ workflow {
     }
     SPLIT_ALIGN_CLEAN_CHUNKS(reads, Channel.value(file("${projectDir}/genome.fa")),
         Channel.value([[:], file("${projectDir}/genome.mmi")]), Channel.value([[:], file("${projectDir}/annotation.bed")]),
-        Channel.value([[:], []]), params.aligner, false, false, false, params.cigar, params.aligner == 'ark',
-        params.reconstruct_engine, Channel.empty())
+        Channel.value([[:], []]), params.aligner, false, false, false, params.cigar, params.aligner == 'ark', false,
+        params.accept, params.pool, params.reconstruct_engine, Channel.empty())
     SPLIT_ALIGN_CLEAN_CHUNKS.out.reads.view { meta, bed -> 'RESULT\\t' + meta.id }
 }
 """.replace("REPO", str(ROOT)))
@@ -186,9 +232,14 @@ workflow {
             ("flnc", "per_sample", isoseqx, True), ("flnc", "per_sample", isoseqx, False),
             ("flnc", "multi_sample", isoseqx, True), ("flnc", "both", isoseqx, True),
             ("cluster", "both", isoseqx, None, "none"), ("refine", "per_sample", isoseqx, None, "none"),
-            ("ccs", "multi_sample", isoseqx, None, "none")):
+            ("ccs", "multi_sample", isoseqx, None, "none"), ("flnc", "per_sample", isoseqx, True, "isoseq", "accept"),
+            ("flnc", "per_sample", isoseqx, True, "isoseq", "accept", "pool")):
+        # 6th field "accept": iso-align selects one read per chunk and fragment acceptance is on;
+        # 7th field "pool": two chunks per sample, fragment reads realigned once per sample
+        accept = "accept" in engine[1:]
+        pool = "pool" in engine[1:]
         engine = engine[0] if engine else "isoseq"
-        case = temporary / f"{entrypoint}-{mode}-{pairs[0]}-{len(pairs)}-{cigar}-{engine}"
+        case = temporary / f"{entrypoint}-{mode}-{pairs[0]}-{len(pairs)}-{cigar}-{engine}{'-accept' if accept else ''}{'-pool' if pool else ''}"
         inputs = case / "02_LIMA"
         inputs.mkdir(parents=True)
         samples = {f"movie.part.hifi.{pair}" for pair in pairs}
@@ -218,12 +269,20 @@ workflow {
         primers.write_text("".join(f">{name}\nACGT\n" for name in names))
         calls = case / "calls.jsonl"
         environment.update(TEST_PRIMER_PAIRS=json.dumps(pairs), TEST_CALLS=str(calls))
+        environment.pop("TEST_FRAGMENTS", None)
+        environment.pop("TEST_TWO_CHUNKS", None)
+        if accept:
+            environment["TEST_FRAGMENTS"] = "1"
+        if pool:
+            environment["TEST_TWO_CHUNKS"] = "1"
         command = base + [str(harness), "--global_input_dir", str(inputs),
                           "--global_output_dir", str(case / "results"), "--cluster_mode", mode,
                           "--entrypoint", entrypoint]
         command += ["--global_primers", str(primers)] if entrypoint != "cluster" else []  # cluster needs none
         command += ["--aligner", "ark", "--cigar", str(cigar).lower()] if cigar is not None else []
         command += ["--cluster_engine", engine]
+        command += ["--accept", "true"] if accept else []
+        command += ["--pool", "true"] if pool else []
         result = subprocess.run(command, cwd=case, env=environment, text=True, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=120)
         assert result.returncode == 0, result.stdout
@@ -277,13 +336,57 @@ workflow {
         # chunk BAM with exactly the chunk FASTA minimap2 aligned it from (reads name -> BAM name).
         # INFO: minimap2 pipes into samtools sort in the same task directory: pair them by it
         sorted_bams = {cwd: args[args.index("-o") + 1] for name, args, cwd in records if name == "samtools" and args[0] == "sort"}
-        chunks = {args[-1]: sorted_bams[cwd].removesuffix(".bam") for name, args, cwd in records if name == "minimap2"}
+        is_fragments = lambda reads: ".fragments." in Path(reads).name
+        chunks = {args[-1]: sorted_bams[cwd].removesuffix(".bam") for name, args, cwd in records
+                  if name == "minimap2" and not is_fragments(args[-1])}
         found = sorted((args[args.index("--bam") + 1], args[args.index("--reads") + 1])
-                       for name, args, *_ in records if name == "iso-align")
+                       for name, args, *_ in records if name == "iso-align" and "--realigned-bam" not in args)
         suffix = ".extended.bam" if cigar else ".bam"
-        assert len(chunks) == (1 if engine == "none" else 2) * len(expected), chunks  # none: no singleton class
+        assert len(chunks) == (1 if engine == "none" else 2) * len(expected) * (2 if pool else 1), chunks  # none: no singleton class
         assert found == (sorted((sam + suffix, reads) for reads, sam in chunks.items()) if cigar is not None else []), (found, chunks)
+        # Acceptance: per chunk, iso-align compares the pass-1 BAM (not the iso-cigar BAM) with the fragments BAM;
+        # samtools drops the accepted reads from the base (iso-cigar) BAM and keeps only them in the fragments BAM;
+        # iso-segment reads exactly those two filtered BAMs per chunk.
+        accepts = sorted((Path(args[args.index("--bam") + 1]).name, Path(args[args.index("--realigned-bam") + 1]).name,
+                          ".singleton." not in args[args.index("--output") + 1])
+                         for name, args, *_ in records if name == "iso-align" and "--realigned-bam" in args)
+        fragment_bams = sorted(Path(sorted_bams[cwd]).name for name, args, cwd in records
+                               if name == "minimap2" and is_fragments(args[-1]))
+        drops = sorted(Path(args[-1]).name for name, args, *_ in records if name == "samtools" and "-U" in args)
+        # each selection is re-sorted (iso-cigar BAMs are not strictly sorted) before indexing
+        resorted = [args for name, args, *_ in records if name == "samtools" and args[0] == "sort" and args[-1] == "selected.unsorted.bam"]
+        assert len(resorted) == (2 * len(drops) if accept else 0), resorted
+        keeps = sorted(Path(args[-1]).name for name, args, *_ in records
+                       if name == "samtools" and "-N" in args and "-U" not in args)
+        selected = sorted(Path(args[args.index("-o") + 1]).name for name, args, *_ in records
+                          if name == "samtools" and args[0] == "sort" and args[-1] == "selected.unsorted.bam"
+                          and args[args.index("-o") + 1].endswith(".selected.bam"))
+        segmented = sorted(Path(args[args.index("--bam") + 1]).name for name, args, *_ in records if name == "iso-segment")
+        if accept:
+            pass1 = sorted(Path(sam).name + ".bam" for sam in chunks.values())
+            if pool:
+                # one re-alignment per sample and read class, shared by both chunks of that sample
+                assert len(fragment_bams) == len(chunks) // 2, (fragment_bams, chunks)
+                assert all(".pooled" in f for f in fragment_bams), fragment_bams
+                assert [p for p, *_ in accepts] == pass1 and sorted(set(f for _, f, _ in accepts)) == fragment_bams, (accepts, pass1)
+            else:
+                assert len(fragment_bams) == len(chunks), (fragment_bams, chunks)
+                assert [p for p, *_ in accepts] == pass1 and sorted(f for _, f, _ in accepts) == fragment_bams, (accepts, pass1)
+            # chunks with accepted reads: base BAM filtered, fragments BAM kept; chunks without: base BAM untouched, no fragments
+            hit = [(p, f) for p, f, any_accepted in accepts if any_accepted]
+            assert hit and len(hit) < len(accepts), accepts
+            assert drops == sorted(p.removesuffix(".bam") + ".extended.bam" for p, _ in hit), drops
+            assert keeps == sorted(f for _, f in hit), keeps
+            # one kept fragments BAM per accepting chunk, named after the chunk (also from a pooled input)
+            assert len(selected) == len(set(selected)) == len(hit), (selected, hit)
+            assert segmented == sorted([d.removesuffix(".bam") + ".filtered.bam" for d in drops] +
+                                       [p.removesuffix(".bam") + ".extended.bam" for p, _, a in accepts if not a] +
+                                       selected), segmented
+        else:
+            assert not accepts and not fragment_bams and not drops and not keeps, (accepts, fragment_bams, drops, keeps)
         second_pass = "" if cigar is None else f", ark second pass, cigar extension {'on' if cigar else 'off'}"
+        second_pass += ", fragment acceptance" if accept else ""
+        second_pass += ", pooled per sample" if pool else ""
         print(f"PASS {entrypoint}: {mode}, {engine}, {', '.join(pairs)}{second_pass}", flush=True)
 
     # A checkpoint without a primer-pair (refine) or _flnc (cluster) suffix must fail before any tool runs.
@@ -351,3 +454,76 @@ workflow {
                                 stderr=subprocess.STDOUT, timeout=120)
         assert result.returncode != 0 and diagnostic in result.stdout, result.stdout
     print("PASS --cluster_engine/--reconstruct_engine validation and isoseq_cluster2_mode rename", flush=True)
+
+    # Splice scores: SPLICING runs splice_model (SpliceAI or SpliceTransformer) or reads its bigWig dir, and the
+    # same splicing crate (SPLICEAI_DERIVE, region floor on) calibrates either model's four bigWigs.
+    splicing = temporary / "splicing.nf"
+    splicing.write_text("""
+include { SPLICING } from 'REPO/src/subworkflows/splicing/main.nf'
+workflow {
+    SPLICING(Channel.value(file("${projectDir}/genome.fa")), Channel.value([[:], file("${projectDir}/annotation.bed")]),
+        params.test_bigwigs, params.test_algorithm, params.splice_model, params.test_scores, null,
+        Channel.value(file("${projectDir}/chrom.sizes")), params.spliceai_chunk_compression, params.test_weights, Channel.empty())
+    SPLICING.out.scores.view { meta, scores -> 'SCORES\\t' + scores.name }
+    SPLICING.out.bigwigs.view { meta, dir -> 'BIGWIGS\\t' + (meta.id ?: '') + '\\t' + (dir ? dir.name : '') }
+}
+""".replace("REPO", str(ROOT)))
+    tracks = ["acceptor_minus.bw", "acceptor_plus.bw", "donor_minus.bw", "donor_plus.bw"]
+    given = temporary / "given_bigwigs"
+    given.mkdir()
+    for track in tracks:  # benchmark naming of the SpliceTransformer bigWigs
+        (given / track).touch()
+    minisplice_scores = temporary / "minisplice.tsv"
+    minisplice_scores.touch()
+    # model, extra flags, model tool run, bigWig dir id/name, derived scores (None: no derive)
+    for model, extra, tool, bigwigs, scores in (
+            ("splicetransformer", [], "splicetransformer", ("splicetransformer", "splicetransformer"), "genome.derived.tsv"),
+            ("splicetransformer", ["--spliceai_chunk_compression", "true", "--test_weights", str(temporary / "SpTransformer_pytorch.ckpt")],
+             "splicetransformer", ("splicetransformer", "splicetransformer"), "genome.derived.tsv"),
+            ("splicetransformer", ["--test_bigwigs", str(given)], None, ("splicetransformer", "given_bigwigs"), "genome.derived.tsv"),
+            ("spliceai", [], "spliceai", ("spliceai", "spliceai"), "genome.derived.tsv"),
+            ("spliceai", ["--test_algorithm", "minisplice", "--test_scores", str(minisplice_scores)], None, ("", ""), None)):
+        case = temporary / f"splicing-{model}-{len(extra)}"
+        case.mkdir()
+        calls = case / "calls.jsonl"
+        environment.update(TEST_CALLS=str(calls))
+        result = subprocess.run(base + [str(splicing), "--splice_model", model, "--minimap2_align_use_splice_scores", "true",
+                                       "--global_output_dir", str(case / "results")] + extra,
+                                cwd=case, env=environment, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=120)
+        assert result.returncode == 0, result.stdout
+        lines = result.stdout.splitlines()
+        assert [l.split("\t")[1] for l in lines if l.startswith("SCORES\t")] == [scores or "minisplice.tsv"], result.stdout
+        assert [tuple(l.split("\t")[1:]) for l in lines if l.startswith("BIGWIGS\t")] == [bigwigs], result.stdout
+        records = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+        runs = [(name, args) for name, args, *_ in records if name in ("splicetransformer", "spliceai")]
+        assert {name for name, _ in runs} == ({tool} if tool else set()), runs
+        if tool:
+            chunk = [args for _, args in runs if args[0] == "chunk"]
+            predict = [args for _, args in runs if args[0] == "predict"]
+            flank = "4000" if tool == "splicetransformer" else "50000"
+            assert len(chunk) == 1 and chunk[0][chunk[0].index("--flank-size") + 1] == flank, chunk
+            # one predict per contig chunk, flank trimmed with the chunker's flank size
+            assert sorted(Path(a[a.index("--sequence") + 1]).name for a in predict) == \
+                sorted(f"tmp.{c}.chunk.0.fa{'.gz' if '--gzip' in chunk[0] else ''}" for c in ("chrA", "chrB")), predict
+            assert all(a[a.index("--offset") + 1] == flank for a in predict), predict
+            assert ("--gzip" in chunk[0]) == ("--spliceai_chunk_compression" in extra and tool == "splicetransformer"), chunk
+            assert all(("--model" in a) == ("--test_weights" in extra) for a in predict), predict
+            assert sum(name == "wigToBigWig" for name, *_ in records) == 8, records
+            merged = sorted(Path(a[-1]).name for name, a, *_ in records if name == "bigtools")
+            assert merged == tracks, merged
+            published = sorted(p.name for p in (case / "results" / f"00_{tool.upper()}" / tool).iterdir())
+            assert published == sorted(tracks), published
+        derive = [args for name, args, *_ in records if name == "splicing"]
+        assert len(derive) == (1 if scores else 0), derive
+        if scores:
+            # TOGA2 CDS region floor, unchanged for either model
+            assert " ".join(derive[0]).startswith("--include-ss-from-regions --position-for-ss-regions cds --region-floor 11"), derive
+            assert Path(derive[0][derive[0].index("--bigwig-dir") + 1]).name == bigwigs[1], derive
+        print(f"PASS splice scores: splice_model {model}{' ' + ' '.join(Path(e).name for e in extra) if extra else ''}", flush=True)
+
+    result = subprocess.run(base + [str(ROOT / "src/main.nf"), "--entrypoint", "cluster", "--splice_model", "foo"],
+                            cwd=temporary, env=environment, text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, timeout=120)
+    assert result.returncode != 0 and "Unknown splice_model option" in result.stdout, result.stdout
+    print("PASS --splice_model validation", flush=True)

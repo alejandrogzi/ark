@@ -176,6 +176,17 @@ pub struct Args {
     pub bonus_score: f32,
 
     #[arg(
+        short = 'R',
+        long = "region-floor",
+        required = false,
+        value_name = "INT",
+        requires = "include_ss_from_regions",
+        conflicts_with = "bonus",
+        help = "With --include-ss-from-regions: after calibration, give every splice site from --regions a derived score of at least INT (sites missing from the BigWigs are added at INT). Unlike --bonus and --score-for-ss-regions, which change raw scores before calibration, this leaves every other site's calibration untouched"
+    )]
+    pub region_floor: Option<i32>,
+
+    #[arg(
         short = 'P',
         long = "position-for-ss-regions",
         required = false,

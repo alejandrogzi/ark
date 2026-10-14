@@ -13,7 +13,8 @@ use std::{
 };
 
 use crate::spliceai::{
-    parse_spliceai_record, ParsedSpliceAiRecord, SpliceSite, Strand, StrandSpliceMap,
+    parse_spliceai_record, ParsedSpliceAiRecord, RegionSpliceSite, SpliceSite, Strand,
+    StrandSpliceMap,
 };
 
 /// Bin edges for SpliceAI score calibration (15 edges = 14 bins).
@@ -296,6 +297,7 @@ pub fn derive_spliceai_score(
     acceptor_profile: &NullProfile,
     floor: i32,
     ceiling: i32,
+    region_floor: Option<RegionFloor<'_>>,
     prefix: &str,
     output_dir: &Path,
 ) -> io::Result<usize> {
@@ -326,6 +328,13 @@ pub fn derive_spliceai_score(
     );
     let acceptor_count = acceptor_records.len();
     records.append(&mut acceptor_records);
+    if let Some(region_floor) = region_floor {
+        let (raised, added) = apply_region_floor(&mut records, &region_floor);
+        info!(
+            "Region floor {}: raised {} derived scores, added {} region sites missing from the BigWigs",
+            region_floor.score, raised, added
+        );
+    }
     records.sort_by(sort_derived_records);
 
     let output_path = output_dir.join(format!("{}.derived.tsv", prefix));
@@ -419,58 +428,105 @@ fn derive_records(
                 ceiling,
             );
 
-            // INFO: adding +1 on acceptor(+) and donor(-) to match minisplice coords
-            match parsed.strand {
-                Strand::Forward => match parsed.splice_site {
-                    SpliceSite::Donor => {
-                        records.push(DerivedScoreRecord {
-                            chr: parsed.chr,
-                            coordinate: parsed.position,
-                            strand: parsed.strand,
-                            dinucleotide: parsed.dinucleotide,
-                            splice_site: parsed.splice_site,
-                            derived_score,
-                        });
-                    }
-                    SpliceSite::Acceptor => {
-                        records.push(DerivedScoreRecord {
-                            chr: parsed.chr,
-                            coordinate: parsed.position + 1,
-                            strand: parsed.strand,
-                            dinucleotide: parsed.dinucleotide,
-                            splice_site: parsed.splice_site,
-                            derived_score,
-                        });
-                    }
-                },
-                Strand::Reverse => match parsed.splice_site {
-                    SpliceSite::Donor => {
-                        records.push(DerivedScoreRecord {
-                            chr: parsed.chr,
-                            coordinate: parsed.position + 1,
-                            strand: parsed.strand,
-                            dinucleotide: parsed.dinucleotide,
-                            splice_site: parsed.splice_site,
-                            derived_score,
-                        });
-                    }
-                    SpliceSite::Acceptor => {
-                        records.push(DerivedScoreRecord {
-                            chr: parsed.chr,
-                            coordinate: parsed.position,
-                            strand: parsed.strand,
-                            dinucleotide: parsed.dinucleotide,
-                            splice_site: parsed.splice_site,
-                            derived_score,
-                        });
-                    }
-                },
-            }
+            records.push(DerivedScoreRecord {
+                chr: parsed.chr,
+                coordinate: written_coordinate(parsed.position, parsed.strand, parsed.splice_site),
+                strand: parsed.strand,
+                dinucleotide: parsed.dinucleotide,
+                splice_site: parsed.splice_site,
+                derived_score,
+            });
         });
     });
 
     info!("Derived {} {} scores", records.len(), label);
     records
+}
+
+/// Written coordinate of a splice site: +1 on acceptor(+) and donor(-) to match minisplice coords.
+fn written_coordinate(position: usize, strand: Strand, splice_site: SpliceSite) -> usize {
+    match (strand, splice_site) {
+        (Strand::Forward, SpliceSite::Acceptor) | (Strand::Reverse, SpliceSite::Donor) => {
+            position + 1
+        }
+        _ => position,
+    }
+}
+
+/// Minimum derived score for region (annotation) splice sites, applied after calibration.
+///
+/// Raising the sites after calibration leaves the calibration of every other site untouched;
+/// boosting them before calibration would empty the low bins of annotated sites and send every
+/// unannotated site there to the floor.
+#[derive(Clone, Copy)]
+pub struct RegionFloor<'a> {
+    pub donors: &'a DashSet<RegionSpliceSite>,
+    pub acceptors: &'a DashSet<RegionSpliceSite>,
+    pub score: i32,
+}
+
+/// Raises every region splice site to at least `region_floor.score` and adds region sites missing
+/// from `records` at that score. Returns (raised, added).
+pub fn apply_region_floor(
+    records: &mut Vec<DerivedScoreRecord>,
+    region_floor: &RegionFloor<'_>,
+) -> (usize, usize) {
+    let key = |chr: &[u8], coordinate: usize, strand: Strand, splice_site: SpliceSite| {
+        (
+            chr.to_vec(),
+            coordinate,
+            matches!(strand, Strand::Forward),
+            matches!(splice_site, SpliceSite::Donor),
+        )
+    };
+    let index: HashMap<_, usize> = records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (key(&r.chr, r.coordinate, r.strand, r.splice_site), i))
+        .collect();
+
+    let mut sites: Vec<RegionSpliceSite> = region_floor
+        .donors
+        .iter()
+        .chain(region_floor.acceptors.iter())
+        .map(|site| site.clone())
+        .collect();
+    // INFO: DashSet iteration order is arbitrary; sort so added records are deterministic
+    sites.sort_by(|a, b| {
+        a.coordinate_key
+            .cmp(&b.coordinate_key)
+            .then(a.dinucleotide.cmp(&b.dinucleotide))
+    });
+
+    let (mut raised, mut added) = (0, 0);
+    let mut seen = std::collections::HashSet::new();
+    for site in sites {
+        let coordinate = written_coordinate(site.position, site.strand, site.splice_site);
+        let k = key(&site.chr, coordinate, site.strand, site.splice_site);
+        if !seen.insert(k.clone()) {
+            continue;
+        }
+        match index.get(&k) {
+            Some(&i) => {
+                if records[i].derived_score < region_floor.score {
+                    records[i].derived_score = region_floor.score;
+                    raised += 1;
+                }
+            }
+            None => {
+                records.push(DerivedScoreRecord {
+                    chr: site.chr.clone(),
+                    coordinate,
+                    strand: site.strand,
+                    dinucleotide: site.dinucleotide.clone(),
+                    splice_site: site.splice_site,
+                    derived_score: region_floor.score,
+                });
+                added += 1;
+            }
+        }
+    }
+    (raised, added)
 }
 
 /// Creates empty bin counts for all score bins.
@@ -680,6 +736,109 @@ fn strand_rank(strand: Strand) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn region_site(
+        chr: &str,
+        position: usize,
+        strand: Strand,
+        splice_site: SpliceSite,
+    ) -> RegionSpliceSite {
+        RegionSpliceSite {
+            coordinate_key: crate::utils::build_coordinate_key(chr, position, strand),
+            chr: chr.as_bytes().to_vec(),
+            position,
+            strand,
+            splice_site,
+            dinucleotide: b"AT".to_vec(),
+        }
+    }
+
+    fn derived(
+        chr: &str,
+        coordinate: usize,
+        strand: Strand,
+        splice_site: SpliceSite,
+        score: i32,
+    ) -> DerivedScoreRecord {
+        DerivedScoreRecord {
+            chr: chr.as_bytes().to_vec(),
+            coordinate,
+            strand,
+            dinucleotide: b"GT".to_vec(),
+            splice_site,
+            derived_score: score,
+        }
+    }
+
+    #[test]
+    fn written_coordinate_shifts_plus_acceptor_and_minus_donor() {
+        assert_eq!(
+            written_coordinate(100, Strand::Forward, SpliceSite::Donor),
+            100
+        );
+        assert_eq!(
+            written_coordinate(100, Strand::Forward, SpliceSite::Acceptor),
+            101
+        );
+        assert_eq!(
+            written_coordinate(100, Strand::Reverse, SpliceSite::Donor),
+            101
+        );
+        assert_eq!(
+            written_coordinate(100, Strand::Reverse, SpliceSite::Acceptor),
+            100
+        );
+    }
+
+    #[test]
+    fn region_floor_raises_keeps_and_adds() {
+        let donors = DashSet::new();
+        let acceptors = DashSet::new();
+        donors.insert(region_site("chr1", 100, Strand::Forward, SpliceSite::Donor)); // low score: raised
+        donors.insert(region_site("chr1", 300, Strand::Reverse, SpliceSite::Donor)); // high score: kept
+        acceptors.insert(region_site(
+            "chr1",
+            199,
+            Strand::Forward,
+            SpliceSite::Acceptor,
+        )); // missing: added at its written coordinate 200
+        let mut records = vec![
+            derived("chr1", 100, Strand::Forward, SpliceSite::Donor, -4),
+            derived("chr1", 301, Strand::Reverse, SpliceSite::Donor, 13),
+            derived("chr1", 500, Strand::Forward, SpliceSite::Donor, -4), // not a region site: untouched
+        ];
+        let floor = RegionFloor {
+            donors: &donors,
+            acceptors: &acceptors,
+            score: 11,
+        };
+        assert_eq!(apply_region_floor(&mut records, &floor), (1, 1));
+        assert_eq!(records[0].derived_score, 11);
+        assert_eq!(records[1].derived_score, 13);
+        assert_eq!(records[2].derived_score, -4);
+        let added = &records[3];
+        assert_eq!(
+            (added.coordinate, added.splice_site, added.derived_score),
+            (200, SpliceSite::Acceptor, 11)
+        );
+        assert_eq!(added.dinucleotide, b"AT".to_vec());
+    }
+
+    #[test]
+    fn region_floor_does_not_lower_or_duplicate() {
+        let donors = DashSet::new();
+        donors.insert(region_site("chr1", 100, Strand::Forward, SpliceSite::Donor));
+        let acceptors = DashSet::new();
+        let mut records = vec![derived("chr1", 100, Strand::Forward, SpliceSite::Donor, 12)];
+        let floor = RegionFloor {
+            donors: &donors,
+            acceptors: &acceptors,
+            score: 8,
+        };
+        assert_eq!(apply_region_floor(&mut records, &floor), (0, 0));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].derived_score, 12);
+    }
 
     fn bytes(value: &str) -> Vec<u8> {
         value.as_bytes().to_vec()

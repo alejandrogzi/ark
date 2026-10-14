@@ -26,6 +26,10 @@ include { ISOTOOLS_FUSION as ISOTOOLS_FUSION_DETECTOR } from '../../modules/cust
 include { ISOTOOLS_CIGAR as ISOTOOLS_CIGAR_EXTENSION } from '../../modules/custom/isotools/cigar/main.nf'
 include { ISOTOOLS_ADAPTER as ISOTOOLS_REMOVE_ADAPTERS } from '../../modules/custom/isotools/adapter/main.nf'
 include { ISOTOOLS_ALIGN as ISOTOOLS_FIND_FRAGMENTS } from '../../modules/custom/isotools/align/main.nf'
+include { ISOTOOLS_ALIGN_ACCEPT as ISOTOOLS_ACCEPT_FRAGMENTS } from '../../modules/custom/isotools/accept/main.nf'
+include { SAMTOOLS_SELECT_READS as SAMTOOLS_DROP_ACCEPTED } from '../../modules/custom/samtools/select/main.nf'
+include { SAMTOOLS_SELECT_READS as SAMTOOLS_KEEP_ACCEPTED } from '../../modules/custom/samtools/select/main.nf'
+include { FASTX_CONCAT as FASTX_CONCAT_FRAGMENTS } from '../../modules/custom/fastx/concat/main.nf'
 
 
 include { COLLAPSE as COLLAPSE_TWINS } from '../../modules/custom/collapse/main.nf'
@@ -51,6 +55,9 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
       collapse_twins           // bool
       cigar_extension          // bool
       do_second_pass           // bool
+      fragments_from_pass1     // bool: iso-align scans the pass-1 BAM instead of the iso-cigar BAM
+      fragments_accept         // bool: a realigned read replaces its pass-1 records only if accepted
+      fragments_pool           // bool: realign the fragment reads of all chunks of a sample in one task
       reconstruct_engine       // string [ chain, none ]
       ch_versions              // [ meta, versions.yml ]
 
@@ -225,6 +232,7 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
       ch_fragments_bam = Channel.empty()
       if (do_second_pass && aligner == 'ark') {
         // WARN: replacing ch_aligned_bam with [ meta, bam, bai ] on both paths
+        ch_pass1_bam = ch_aligned_bam.join(ch_aligned_bai) // [ meta, bam, bai ] before iso-cigar
         if (cigar_extension) {
           ISOTOOLS_CIGAR_EXTENSION(
             ch_aligned_bam,
@@ -236,8 +244,15 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
           ch_aligned_bam = ISOTOOLS_CIGAR_EXTENSION.out.extended
           ch_versions = ch_versions.mix(ISOTOOLS_CIGAR_EXTENSION.out.versions)
         } else {
-          ch_aligned_bam = ch_aligned_bam.join(ch_aligned_bai)
+          ch_aligned_bam = ch_pass1_bam
         }
+
+        // INFO: iso-cigar extends split primaries across the long gap and drops their SA tag, which moves
+        // INFO: them out of iso-align's gap window; scanning the pass-1 BAM keeps them selectable. The id
+        // INFO: suffix is kept so fragment names and joins do not change.
+        ch_find_input = (fragments_from_pass1 && cigar_extension)
+            ? ch_pass1_bam.map { meta, bam, bai -> [ meta + [ id: meta.id + '.extended' ], bam, bai ] }
+            : ch_aligned_bam
 
         // INFO: iso-align needs each chunk BAM plus the chunk FASTA it was aligned from.
         // INFO: key [ sample_id, singleton, chunk ] is set before alignment and survives every meta.clone().
@@ -248,7 +263,7 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
             .groupTuple()
             .set { ch_chunk_reads } // [ key, [ fasta, ... ] ]
 
-        ch_aligned_bam
+        ch_find_input
             .map { meta, bam, bai -> [ [ meta.sample_id, meta.singleton, meta.chunk ], meta, bam, bai ] }
             .combine(ch_chunk_reads, by: 0)
             .multiMap { key, meta, bam, bai, reads ->
@@ -271,17 +286,127 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
 
         // INFO: fragment reads [ meta + id '.fragments', fasta ] realigned with the larger intron cap
         // INFO: (minimap2_realign_intron_size); ch_fragments_bam: [ meta, bam, bai ]
+        // INFO: same hint level as pass 1; without annotation hints the fragments get no --junc-bed either.
+        // INFO: pooling: a chunk has only ~100 fragment reads, so a per-chunk task spends nearly all its time loading
+        // INFO: the minimap2 index and the splice-score table. With fragments_pool the FASTAs of all chunks of a
+        // INFO: sample are concatenated and realigned once (meta.chunk = 'pooled'); minimap2 aligns each read
+        // INFO: independently, so the alignments are the same as per chunk.
+        ch_fragments_fasta = ISOTOOLS_FIND_FRAGMENTS.out.fasta
+        if (fragments_pool) {
+          ISOTOOLS_FIND_FRAGMENTS.out.fasta
+              .map { meta, fasta -> [ [ meta.sample_id, meta.singleton, meta.id ], meta, fasta ] }
+              .groupTuple(by: 0)
+              .map { key, metas, fastas ->
+                  def single = metas[0].singleton ? '.singleton' : ''
+                  [ metas[0] + [ chunk: 'pooled', outfile: "${metas[0].id}.pooled${single}.fasta" ], fastas ]
+              }
+              .set { ch_fragments_pool_in }
+
+          FASTX_CONCAT_FRAGMENTS(ch_fragments_pool_in)
+          ch_fragments_fasta = FASTX_CONCAT_FRAGMENTS.out.reads.map { meta, fasta -> [ meta - [ outfile: meta.outfile ], fasta ] }
+          ch_versions = ch_versions.mix(FASTX_CONCAT_FRAGMENTS.out.versions)
+        }
+
         ARK_ALIGN_FRAGMENTS(
-          ISOTOOLS_FIND_FRAGMENTS.out.fasta,
+          ch_fragments_fasta,
           ch_genome_index,
           ch_splice_scores,
-          ch_reference_transcripts
+          aligner_use_annotation ? ch_reference_transcripts : Channel.value([[:], []])
         )
 
         ARK_ALIGN_FRAGMENTS.out.bam
             .join(ARK_ALIGN_FRAGMENTS.out.bai)
             .set { ch_fragments_bam }
         ch_versions = ch_versions.mix(ARK_ALIGN_FRAGMENTS.out.versions)
+
+        /*
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            ACCEPTANCE [ optional ]
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        */
+
+        // INFO: without acceptance a realigned read reaches iso-segment twice (pass-1 + realigned records).
+        // INFO: with it, iso-align (accept mode) decides per read, comparing primary records only:
+        // INFO:   1. AS(realigned) > AS(pass-1), strictly. AS comes from the pass-1 BAM because iso-cigar
+        // INFO:      drops AS/NM on the records it edits; a missing AS on either side rejects the read.
+        // INFO:   2. the realigned primary is hq, as iso-segment defines it: identity >= isotools_fragments_min_identity
+        // INFO:      (98; (M - mismatches) / (M + I + D), mismatches = NM - indels; no NM = reject) and soft/hard clip
+        // INFO:      <= isotools_fragments_max_clip (20 bp) on both ends. Accepted reads are therefore hq downstream too.
+        // INFO: a rejected read keeps its base records (iso-cigar BAM). An accepted read loses every base record
+        // INFO: (primary + supplementary, SAMTOOLS_DROP_ACCEPTED), and the fragments BAM keeps only accepted
+        // INFO: reads (SAMTOOLS_KEEP_ACCEPTED), so each read reaches iso-segment exactly once.
+        // INFO: rule text and threshold sweep: isotools iso-align/README.md.
+        // INFO: key [ sample_id, singleton, chunk, id without the '.extended' / '.fragments' suffixes ] pairs a
+        // INFO: chunk's base, pass-1 and fragments BAMs. The id is needed: under flnc, X.fasta.gz and X.hq.fasta.gz
+        // INFO: share [ sample_id, singleton, chunk ]. failOnDuplicate turns any remaining collision into an error.
+        if (fragments_accept) {
+          def chunkKey = { meta ->
+              [ meta.sample_id, meta.singleton, meta.chunk, meta.id.toString().replaceFirst(/(\.extended)?(\.fragments)?$/, '') ]
+          }
+          // INFO: pooled fragments: one realigned BAM per sample, shared by every chunk of that sample (chunk dropped)
+          def poolKey = { meta -> chunkKey(meta).withIndex().findAll { v, i -> i != 2 }.collect { v, i -> v } }
+
+          if (fragments_pool) {
+            // INFO: each chunk's pass-1 BAM is paired with its sample's pooled BAM; iso-align decides only the reads
+            // INFO: that have a pass-1 primary in that chunk (the others are missing_score there and accepted, or
+            // INFO: not, in their own chunk). meta.chunk is set back to the pass-1 chunk for the joins below.
+            ch_pass1_bam
+                .map { meta, bam, bai -> [ poolKey(meta), meta, bam, bai ] }
+                .combine(ch_fragments_bam.map { meta, bam, bai -> [ poolKey(meta), meta, bam, bai ] }, by: 0)
+                .map { key, pmeta, pass1_bam, pass1_bai, meta, bam, bai -> [ meta + [ chunk: pmeta.chunk ], pass1_bam, pass1_bai, bam, bai ] }
+                .set { ch_accept_input }
+          } else {
+            ch_pass1_bam
+                .map { meta, bam, bai -> [ chunkKey(meta), bam, bai ] }
+                .join(ch_fragments_bam.map { meta, bam, bai -> [ chunkKey(meta), meta, bam, bai ] }, failOnDuplicate: true)
+                .map { key, pass1_bam, pass1_bai, meta, bam, bai -> [ meta, pass1_bam, pass1_bai, bam, bai ] }
+                .set { ch_accept_input }
+          }
+
+          ISOTOOLS_ACCEPT_FRAGMENTS(ch_accept_input)
+          ch_versions = ch_versions.mix(ISOTOOLS_ACCEPT_FRAGMENTS.out.versions)
+
+          ch_accepted = ISOTOOLS_ACCEPT_FRAGMENTS.out.names.map { meta, names -> [ chunkKey(meta), names ] }
+
+          // INFO: chunks without fragments (no names list) or with no accepted read (empty list) pass through
+          // INFO: unchanged; the meta filter drops names lists without a base BAM (remainder fills meta with null).
+          ch_aligned_bam
+              .map { meta, bam, bai -> [ chunkKey(meta), meta, bam, bai ] }
+              .join(ch_accepted, remainder: true, failOnDuplicate: true)
+              .filter { key, meta, bam, bai, names -> meta != null }
+              .branch { key, meta, bam, bai, names ->
+                  filter: names != null && names.size() > 0
+                      return [ meta, bam, bai, names ]
+                  keep: true
+                      return [ meta, bam, bai ]
+              }
+              .set { ch_base_split }
+
+          SAMTOOLS_DROP_ACCEPTED(ch_base_split.filter)
+          ch_aligned_bam = ch_base_split.keep.mix(SAMTOOLS_DROP_ACCEPTED.out.bam)
+
+          // INFO: chunks with no accepted read emit no fragments BAM. Pooled: each chunk keeps its own accepted reads
+          // INFO: from the sample's pooled BAM, so the fragments BAMs stay one per chunk downstream.
+          if (fragments_pool) {
+            ISOTOOLS_ACCEPT_FRAGMENTS.out.names
+                .filter { meta, names -> names.size() > 0 }
+                .map { meta, names -> [ poolKey(meta), meta, names ] }
+                .combine(ch_fragments_bam.map { meta, bam, bai -> [ poolKey(meta), bam, bai ] }, by: 0)
+                .map { key, meta, names, bam, bai -> [ meta, bam, bai, names ] }
+                .set { ch_fragments_accept }
+          } else {
+            ch_fragments_bam
+                .map { meta, bam, bai -> [ chunkKey(meta), meta, bam, bai ] }
+                .join(ch_accepted, failOnDuplicate: true)
+                .filter { key, meta, bam, bai, names -> names.size() > 0 }
+                .map { key, meta, bam, bai, names -> [ meta, bam, bai, names ] }
+                .set { ch_fragments_accept }
+          }
+
+          SAMTOOLS_KEEP_ACCEPTED(ch_fragments_accept)
+          ch_fragments_bam = SAMTOOLS_KEEP_ACCEPTED.out.bam
+          ch_versions = ch_versions.mix(SAMTOOLS_DROP_ACCEPTED.out.versions, SAMTOOLS_KEEP_ACCEPTED.out.versions)
+        }
 
 
       } else {

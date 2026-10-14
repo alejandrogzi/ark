@@ -374,7 +374,10 @@ fn extract_splice_site_pair(
             donor_seq = acceptor_seq;
             acceptor_seq = tmp;
 
-            donor = end as usize;
+            // INFO: same intron-base convention as the SpliceAI maps (spliceai.rs extract_dinucleotide):
+            // INFO: reverse donor = last intron base in genome order (end - 1), reverse acceptor = first (start).
+            // INFO: `end` (the first exon base) put every reverse-strand donor 1 nt off its SpliceAI record.
+            donor = end as usize - 1;
             acceptor = start as usize;
         }
         AnnotationStrand::Unknown => {}
@@ -738,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn reverse_strand_region_sites_keep_existing_coordinate_conventions() {
+    fn reverse_strand_region_sites_use_spliceai_coordinate_conventions() {
         let mut record = GenePred::from_coords(bytes("chr1"), 0, 10, Extras::new());
         record.set_strand(Some(AnnotationStrand::Reverse));
         record.set_block_count(Some(2));
@@ -765,8 +768,8 @@ mod tests {
         );
 
         assert!(region_donors.contains(&region_site(
-            "chr1:7(-)",
-            7,
+            "chr1:6(-)",
+            6,
             SpliceAiStrand::Reverse,
             SpliceSite::Donor,
             "CT"
