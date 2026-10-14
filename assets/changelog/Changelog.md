@@ -55,6 +55,41 @@
 
 # Changelog
 
+## [v2.1.4] - 2026-10-14
+
+- **SpliceTransformer is the default splice-site model.** New parameter `splice_model` (`splicetransformer` by default, or `spliceai`), used when `minimap2_align_splicing_algorithm = spliceai`.
+  - Both models give four per-base bigWigs that the same `splicing` crate calibrates into `--spsc` scores, including the TOGA2 floor below.
+  - The SpliceTransformer chunk / predict / publish steps are ported from hillerlab/core (`ghcr.io/hillerlab/splicetransformer:0.0.5`: readable bundled weights, CUDA torch).
+  - New parameters: `splicetransformer_bigwigs_dir` (precomputed bigWigs, skips the model), `splicetransformer_model_path`, `splicetransformer_device` (`auto`), `splicetransformer_gpu` (requests a GPU and passes `--nv` / `--gpus all`), `splicetransformer_chunk_size`, `splicetransformer_flank_size`.
+  - In the benchmark, SpliceTransformer scores beat SpliceAI + TOGA2 at ARK pass 1 on real mouse data (intron, exon and CDS-exon F1, 10/10 samples) and keep U12 (AT-AC) sites that SpliceAI pulls away.
+  - Genome-wide prediction needs a GPU; on CPU, use precomputed bigWigs.
+- **TOGA2 sites get a post-calibration floor (`spliceai_region_floor = 11`, splicing 0.0.7 `--region-floor`) instead of the pre-calibration `--bonus`.**
+  - The bonus was applied before calibration. It emptied the low score bins, which then calibrated to the floor, so about 93% of unannotated sites ended at the minimum score.
+  - The floor now raises TOGA2 sites after calibration and leaves every other site at its calibrated score. `null` restores `--bonus`.
+- **Reverse-strand TOGA2 donors were 1 nt off** (splicing `annotation.rs`): the donor is now the last intron base (`end - 1`), the convention of the SpliceAI maps.
+- **The long-intron fragment pass selects and accepts reads explicitly** (iso-align >= 0.0.5).
+  - Four selection rules, on the pass-1 BAM (`isotools_fragments_from_pass1`): `split`, `insertion` (an exon left as an insertion next to a long intron, i.e. a bridge), `long-intron-clip`, `orphan-clip`.
+  - A realignment replaces a read's records only if its `AS` is higher and it is hq (identity >= 98, clips <= 20; `isotools_fragments_accept`).
+  - Accepted reads are dropped from the iso-cigar BAM and kept alone in the fragments BAM (`isotools/accept`, `samtools/select`), so each read reaches iso-segment once.
+  - The accept module fails clearly on an older iso-align.
+- **Fragment reads are realigned once per sample (`isotools_fragments_pool = true`).**
+  - Per chunk, each task spent most of its time loading the minimap2 index and the splice-score table to align about 100 reads.
+  - On 10 mouse samples the step went from 883 tasks / 357 wall-hours to 10 tasks / 1.5 wall-hours, with identical accepted reads.
+- **The iso-cigar BAM can be published** (`iso_cigar_publish_bam`, `06_ARK_ALIGN/EXTENDED`).
+- **iso-segment low-quality BEDs:**
+  - They are renamed per chunk like the hq ones (before, every chunk wrote the same name and only the last survived).
+  - Their removal works with `-X` (many files).
+  - The duplicate `ext.keep_temp` in both segment blocks is removed.
+- **`--junc-bed` is passed only with a BED.** With both hint flags off, minimap2 read the next argument as the BED path.
+- **`aligner = mm2` gets splice scores** when `minimap2_align_use_splice_scores` is on.
+- **uLTRA aligned only the first read chunk.** `ULTRA_INDEX` output is now a value channel (`.first()`).
+- **SpliceAI chunk ids keep the contig.** Chunk numbers restart per contig, so two contigs' chunk 0 collided when the bigWigs were merged.
+- **`FASTA_CLEAN` no longer writes onto its own staged input** for a plain (uncompressed) FASTA.
+- **`spliceai_flank_size` is one parameter for the chunker `--flank-size` and the predict `--offset`.**
+- **isox-py modules use `:latest`.**
+- **Parameter checks:** unknown `splice_model` / `minimap2_align_splicing_algorithm` values are rejected.
+- **CI:** new cases for fragment acceptance, pooled fragments and the splice-score wiring (30 cases).
+
 ## [v2.1.3] - 2026-10-09
 
 - **minimap2 now gets `--cs=<tag>` instead of `-cs <tag>`.** `-cs long` is parsed as `-c -s long` (peak DP score 0, no `cs:Z` tag), so pass 1 and the fragment pass reported low-scoring split alignments that should have been dropped. Both `MINIMAP2_ALIGN` blocks now pass `--cs=${params.minimap2_align_cigar_tag}`.
