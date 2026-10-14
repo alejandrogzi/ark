@@ -7,7 +7,7 @@ use simple_logger::init_with_level;
 
 use splicing::{
     annotation::get_ss_from_annotation,
-    calibration::{build_null_profile, derive_spliceai_score, make_bins},
+    calibration::{build_null_profile, derive_spliceai_score, make_bins, RegionFloor},
     cli::Args,
     genome::get_dinucleotide_count,
     spliceai::{get_splice_scores, include_region_splice_sites},
@@ -23,6 +23,15 @@ fn main() {
             args.floor, args.ceiling
         );
         std::process::exit(1);
+    }
+    if let Some(region_floor) = args.region_floor {
+        if region_floor < args.floor || region_floor > args.ceiling {
+            error!(
+                "ERROR: region floor ({}) must lie within [floor, ceiling] = [{}, {}]",
+                region_floor, args.floor, args.ceiling
+            );
+            std::process::exit(1);
+        }
     }
 
     rayon::ThreadPoolBuilder::new()
@@ -54,7 +63,9 @@ fn main() {
             std::process::exit(1);
         });
 
-    if args.include_ss_from_regions {
+    // INFO: with --region-floor the region sites are applied after calibration (in derive_spliceai_score);
+    // INFO: otherwise they enter the raw maps here, before calibration
+    if args.include_ss_from_regions && args.region_floor.is_none() {
         include_region_splice_sites(
             &spliceai_donor_scores,
             &spliceai_acceptor_scores,
@@ -88,6 +99,11 @@ fn main() {
         &acceptor_profile,
         args.floor,
         args.ceiling,
+        args.region_floor.map(|score| RegionFloor {
+            donors: &region_donors,
+            acceptors: &region_acceptors,
+            score,
+        }),
         &args.prefix,
         &args.output_dir,
     )

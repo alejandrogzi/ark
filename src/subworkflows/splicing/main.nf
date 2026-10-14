@@ -10,6 +10,7 @@ include { SPLICEAI_DERIVE } from '../../modules/custom/spliceai/derive/main.nf'
 include { GUNZIP as GUNZIP_SPLICEAI } from '../../modules/custom/gunzip/main.nf'
 include { GUNZIP as GUNZIP_MINISPLICE } from '../../modules/custom/gunzip/main.nf'
 include { SPLICEAI as SPLICEAI_RUN } from '../spliceai/main.nf'
+include { SPLICETRANSFORMER as SPLICETRANSFORMER_RUN } from '../splicetransformer/main.nf'
 
 /*
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -23,32 +24,36 @@ workflow SPLICING {
       genome         // channel: [ val(meta), [ genome ] ]
       annotation     // channel: [ val(meta), [ annotation ] ]
       bigwigs        // path
-      algorithm      // string
+      algorithm      // string [ spliceai, minisplice ]
+      model          // string [ spliceai, splicetransformer ]; per-base model behind algorithm spliceai
       minisplice     // path
       spliceai       // path
       chromsizes     // channel: [  chromsizes ]
       compression    // bool
+      weights        // path [ SpliceTransformer weights; null = bundled in the image ]
       ch_versions    // channel: [ path(version) ]
 
     main:
       // INFO: emits genome-wide splice scores as [ meta, scores ], used by ARK_ALIGN
       // INFO: decision tree per algorithm:
-      // INFO:   spliceai   -> precomputed scores > derive from given bigwigs > run SpliceAI + derive
+      // INFO:   spliceai   -> precomputed scores > derive from given bigwigs > run `model` + derive
+      // INFO:                 (model spliceai or splicetransformer; both give four per-base bigWigs that the
+      // INFO:                 same SPLICEAI_DERIVE (splicing crate) calibrates, incl. the region floor)
       // INFO:   minisplice -> precomputed scores > download model + predict
       ch_spliceai_bigwigs = Channel.value([[:], []])
 
       if (algorithm == "spliceai") {
           /*
           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-              SPLICEAI [ SCORES, BIGWIGS, MODEL ]
+              SPLICEAI / SPLICETRANSFORMER [ SCORES, BIGWIGS, MODEL ]
           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
           */
 
-          // INFO: user bigwig dir -> [ [ id: spliceai ], dir ], emitted as `bigwigs`
+          // INFO: user bigwig dir -> [ [ id: model ], dir ], emitted as `bigwigs`
           // INFO: (downstream: iso-classify --bigwig and the POLISH orphan finder)
           if (bigwigs) {
             Channel.value([
-                    [ id: "spliceai" ],
+                    [ id: model ],
                     file(bigwigs, checkIfExists: true)
             ]).set { ch_spliceai_bigwigs }
           }
@@ -78,17 +83,29 @@ workflow SPLICING {
               ch_scores = SPLICEAI_DERIVE.out.scores
               ch_versions = ch_versions.mix(SPLICEAI_DERIVE.out.versions)
             } else {
-                // INFO: nothing given -> run SpliceAI genome-wide, then derive scores from its bigwigs
-                SPLICEAI_RUN(
-                    genome.map { genome -> [ [id:genome.baseName], genome ] },
-                    chromsizes,
-                    compression,
-                    ch_versions
-                )
-
-                // INFO: SPLICEAI_RUN emits a bare dir; wrap it as [ meta, dir ] like a user-given
+                // INFO: nothing given -> run the model genome-wide, then derive scores from its bigwigs
+                // INFO: both runners emit a bare dir; wrap it as [ meta, dir ] like a user-given
                 // INFO: bigwig dir, so SPLICEAI_DERIVE and the `bigwigs` emit see the same shape
-                ch_spliceai_bigwigs = SPLICEAI_RUN.out.spliceai.map { dir -> [ [ id: "spliceai" ], dir ] }
+                if (model == "splicetransformer") {
+                    SPLICETRANSFORMER_RUN(
+                        genome.map { genome -> [ [id:genome.baseName], genome ] },
+                        chromsizes,
+                        compression,
+                        weights,
+                        ch_versions
+                    )
+                    ch_spliceai_bigwigs = SPLICETRANSFORMER_RUN.out.splicetransformer.map { dir -> [ [ id: model ], dir ] }
+                    ch_versions = SPLICETRANSFORMER_RUN.out.versions
+                } else {
+                    SPLICEAI_RUN(
+                        genome.map { genome -> [ [id:genome.baseName], genome ] },
+                        chromsizes,
+                        compression,
+                        ch_versions
+                    )
+                    ch_spliceai_bigwigs = SPLICEAI_RUN.out.spliceai.map { dir -> [ [ id: model ], dir ] }
+                    ch_versions = ch_versions.mix(SPLICEAI_RUN.out.versions)
+                }
 
                 SPLICEAI_DERIVE(
                     genome.map { genome -> [ [id:genome.baseName], genome ] },
@@ -97,7 +114,6 @@ workflow SPLICING {
                 )
 
                 ch_scores = SPLICEAI_DERIVE.out.scores
-                ch_versions = ch_versions.mix(SPLICEAI_RUN.out.versions)
                 ch_versions = ch_versions.mix(SPLICEAI_DERIVE.out.versions)
             }
           }

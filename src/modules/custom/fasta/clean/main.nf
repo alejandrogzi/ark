@@ -31,7 +31,9 @@ process FASTA_CLEAN {
     task.ext.when == null || task.ext.when
 
     script:
-    clean = fasta.name - '.gz' // INFO: same name as a plain gunzip, so downstream file names do not change
+    // INFO: same name as a plain gunzip, so downstream file names do not change. fasta.name keeps the
+    // INFO: stageAs dir ('input/x.fa'): a plain FASTA would be written onto its own staged input.
+    clean = fasta.toString().tokenize('/')[-1] - '.gz'
     """
     zcat -f $fasta \\
         | awk '/^>/ { print \$1; next } { gsub(/[RYKMSWBDHV]/, "N"); gsub(/[rykmswbdhv]/, "n"); print }' \\
@@ -44,7 +46,7 @@ process FASTA_CLEAN {
     """
 
     stub:
-    clean = fasta.name - '.gz'
+    clean = fasta.toString().tokenize('/')[-1] - '.gz'
     """
     touch $clean
 

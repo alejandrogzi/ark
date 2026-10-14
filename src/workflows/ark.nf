@@ -97,10 +97,13 @@ workflow ARK {
         params.minimap2_index_path,
         params.minimap2_align_use_splice_scores,
         params.minimap2_align_splicing_algorithm,
-        params.spliceai_bigwigs_dir,
+        params.splice_model,
+        // INFO: precomputed bigWigs of the selected model (either dir is calibrated by the same splicing crate)
+        params.splice_model == 'splicetransformer' ? params.splicetransformer_bigwigs_dir : params.spliceai_bigwigs_dir,
         params.minisplice_scores_path,
         params.spliceai_scores_path,
         params.spliceai_chunk_compression,
+        params.splicetransformer_model_path,
         params.global_prefix,
         params.aligner,
         params.ultra_use_annotation,
@@ -132,6 +135,9 @@ workflow ARK {
           params.collapse_shrink_twins,
           params.isotools_cigar_extension_extend,
           params.minimap2_align_do_second_pass,
+          params.isotools_fragments_from_pass1,
+          params.isotools_fragments_accept,
+          params.isotools_fragments_pool,
           params.reconstruct_engine,
           ch_versions
         )

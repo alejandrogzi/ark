@@ -34,25 +34,20 @@ process ISOTOOLS_SEGMENT {
         --batch ${chunk} \\
         $singleton
 
-    if [ $keep_temp == false ]; then
-        if [ -f *${prefix}.lq.bed ]; then
-            rm *${prefix}.lq.bed
-        fi
-    fi
-
-    if [ $singleton ]; then
-        for f in *${prefix}.hq.bed; do
-            if [ -f "\$f" ]; then
-              mv "\$f" "\${f%.hq.bed}.${chunk}.singleton.hq.bed"
+    # INFO: -X writes one hq / lq BED per chromosome; both are renamed per chunk (and singleton class) so that
+    # INFO: published files of different chunks do not overwrite each other. lq is removed unless kept.
+    suffix=".${chunk}"
+    if [ "${singleton}" ]; then suffix=".${chunk}.singleton"; fi
+    for kind in hq lq; do
+        for f in *${prefix}.\$kind.bed; do
+            [ -f "\$f" ] || continue
+            if [ \$kind = lq ] && [ "${keep_temp}" = false ]; then
+                rm "\$f"
+            else
+                mv "\$f" "\${f%.\$kind.bed}\${suffix}.\$kind.bed"
             fi
         done
-    else
-        for f in *${prefix}.hq.bed; do
-            if [ -f "\$f" ]; then
-              mv "\$f" "\${f%.hq.bed}.${chunk}.hq.bed"
-            fi
-        done
-    fi
+    done
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":

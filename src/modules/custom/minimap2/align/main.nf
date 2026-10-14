@@ -27,7 +27,7 @@ process MINIMAP2_ALIGN {
     def singleton = meta.singleton ? ".singleton" : ""
     def bam = "${meta.id}.${meta.chunk}${singleton}.bam"
     def spsc = splice_scores ? "--spsc=${splice_scores}" : ''
-    def junc = task.ext.use_junc_bed ? "--junc-bed ${junc_bed}" : ''
+    def junc = task.ext.use_junc_bed && junc_bed ? "--junc-bed ${junc_bed}" : ''
     """
     minimap2 \\
         $args \\

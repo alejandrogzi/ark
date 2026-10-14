@@ -51,11 +51,13 @@ workflow PREPROCESSING {
       raw_database           // path
       minimap2_index         // path
       use_splice_scores      // bool
-      splice_score_algorithm // string
-      bigwigs                // path
+      splice_score_algorithm // string [ spliceai, minisplice ]
+      splice_model           // string [ spliceai, splicetransformer ]; per-base model for algorithm spliceai
+      bigwigs                // path [ bigWig dir of splice_model ]
       minisplice             // path
       spliceai               // path
       compression            // bool
+      splicetransformer_weights // path [ SpliceTransformer weights; null = bundled in the image ]
       global_prefix          // string
       aligner                // string [ ark, mm2, ultra, desalt, pbmm2, flair ]
       ultra_use_annotation   // bool
@@ -216,7 +218,9 @@ workflow PREPROCESSING {
                 )
               }
 
-              ch_genome_index = ULTRA_INDEX.out.index
+              // INFO: the GTF arrives on a queue channel, so the index does too; .first() makes it a value
+              // INFO: channel, otherwise ULTRA_ALIGN pairs it with the first read chunk only
+              ch_genome_index = ULTRA_INDEX.out.index.first()
               ch_versions = ch_versions.mix(ULTRA_INDEX.out.versions)
           }
         break
@@ -272,23 +276,27 @@ workflow PREPROCESSING {
 
       /*
       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-          GENOMIC SPLICE SCORE BUILDERS [ ark only ]
+          GENOMIC SPLICE SCORE BUILDERS [ ark, mm2 ]
      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       */
 
       ch_splice_scores = Channel.empty()
       ch_spliceai_bigwigs = Channel.value([[:], []])
-      if (use_splice_scores && aligner == "ark") {
+      // INFO: mm2 runs the same MINIMAP2_ALIGN module as ark pass 1; without scores it silently got neither
+      // INFO: --spsc nor --junc-bed when use_splice_scores was on (use_junc_bed = !use_splice_scores)
+      if (use_splice_scores && aligner in ["ark", "mm2"]) {
           if (splice_score_algorithm == "spliceai") {
               SPLICEAI_GENOMIC_SPLICE_SCORES(
                   ch_genome.genome,
                   ch_reference_transcripts,
                   bigwigs,
                   splice_score_algorithm,
+                  splice_model,
                   minisplice,
                   spliceai,
                   ch_genome.chrom_sizes,
                   compression,
+                  splicetransformer_weights,
                   ch_versions
               )
               ch_splice_scores = SPLICEAI_GENOMIC_SPLICE_SCORES.out.scores
@@ -299,10 +307,12 @@ workflow PREPROCESSING {
                   ch_reference_transcripts,
                   bigwigs,
                   splice_score_algorithm,
+                  splice_model,
                   minisplice,
                   spliceai,
                   ch_genome.chrom_sizes,
                   compression,
+                  splicetransformer_weights,
                   ch_versions
               )             
               ch_splice_scores = MINISPLICE_GENOMIC_SPLICE_SCORES.out.scores

@@ -30,7 +30,7 @@
     "// 3)": "Aligner options [ ark, mm2, ultra, desalt, pbmm2, flair ] ────────────────────────────────────────",
     "aligner": "ark",
 
-    "// 3.1)": "Ark/Minimap2 options [ scoring options: spliceai, minisplice ] ────────────────────────────────────────",
+    "// 3.1)": "Ark/Minimap2 options [ scoring options: spliceai, minisplice; spliceai runs splice_model ] ────────────────────────────────────────",
     "minimap2_index_path": null,
     "minimap2_align_use_junc_bed": true,
     "minimap2_align_use_splice_scores": true,
@@ -44,14 +44,21 @@
     "desalt_index": null,
     "desalt_use_annotation": false,
 
-    "// 4)": "SpliceAI/minisplice options ────────────────────────────────────────",
+    "// 4)": "SpliceAI/SpliceTransformer/minisplice options ────────────────────────────────────────",
     "spliceai_bigwigs_dir": null,
+    "spliceai_flank_size": 50000,
+    "spliceai_region_floor": 11,
     "spliceai_scores_path": null,
+    "splice_model": "splicetransformer",
+    "splicetransformer_bigwigs_dir": null,
+    "splicetransformer_gpu": false,
+    "splicetransformer_model_path": null,
     "minisplice_scores_path": null,
 
     "// 5)": "Isotools adapter / collapse / cigar options ────────────────────────────────────────",
     "isotools_adapter_remove_adapters": false,
     "isotools_cigar_extension_extend": true,
+    "iso_cigar_publish_bam": false,
     "collapse_shrink_twins": false,
 
     "// 6)": "Isotools segment options ────────────────────────────────────────",
