@@ -55,6 +55,14 @@
 
 # Changelog
 
+## [v2.1.5] - 2026-10-14
+
+- **New iso-segment hq defaults, from the read-filtering benchmark:** identity 98 → **95** (`isotools_segment_identity_threshold`), 5′ clip 20 → **10** (`isotools_segment_max_five_prime_clip`), and a new MAPQ rule, `isotools_segment_min_mapq = 1` (`0` disables it). The 3′ clip stays at 20.
+  - The 98% identity rule mostly removed correct reads.
+  - With the new defaults the simulations lose 0.6% instead of 2.8% of correct reads, and still drop > 99.5% of chimeras and adapter reads.
+  - On real mouse data, intron, exon and CDS-exon F1 rise slightly (10/10 samples), and long-intron F1 is level.
+  - Needs iso-segment >= 0.0.11 (`-q / --min-mapq`).
+
 ## [v2.1.4] - 2026-10-14
 
 - **SpliceTransformer is the default splice-site model.** New parameter `splice_model` (`splicetransformer` by default, or `spliceai`), used when `minimap2_align_splicing_algorithm = spliceai`.
