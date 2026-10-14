@@ -121,9 +121,10 @@ cat > "${run_dir}/params.json" <<EOF
     "collapse_shrink_twins": false,
 
     "// 8)": "Isotools segment options ────────────────────────────────────────",
-    "isotools_segment_identity_threshold": 98,
-    "isotools_segment_max_five_prime_clip": 20,
+    "isotools_segment_identity_threshold": 95,
+    "isotools_segment_max_five_prime_clip": 10,
     "isotools_segment_max_three_prime_clip": 20,
+    "isotools_segment_min_mapq": 1,
 
     "// 9)": "xORF options ────────────────────────────────────────",
     "xorf_protein_database": ${database},
