@@ -55,6 +55,29 @@
 
 # Changelog
 
+## [v2.1.6] - 2026-10-22
+
+- **xORF 0.2.0 (`modules/xorf`, from 0.1.1): new PREDICT model (v3.2).**
+  - XGBoost with 63 features: per-candidate TranslationAI, RNAsamba, PSAURON and DIAMOND/Swiss-Prot scores, ORF structure, and context features against the other starts of the same stop codon and the other candidates of the transcript. TransAID only enters as presence flags, and NetStart2 is no longer an input.
+  - Trained on coding transcripts and lncRNAs of human (hg38), mouse (mm39) and RefSeq rat. On five species not used for training (cow, platypus, elephant, harpy eagle, dog) it calls the annotated CDS for 98.4–99.3% of coding transcripts (v2: 96.1–97.8%), with fewer wrong calls on every species.
+  - PREDICT pins `ghcr.io/hillerlab/orf-predict:v0.2.0` instead of `latest`, and stops if `predict.py` is older than 0.1.0.
+- **The ORF cutoffs follow the model:** `xorf_predict_min_score_max_predictions` 0.50 → **−1** and `xorf_predict_threshold` 0.5 → **−1**, also in `params.json`, `assets/sh/ark.sh` and the CI params (0.50 / 0.01 there).
+  - A negative value selects the cutoff stored in the model bundle, 0.29: the score at which 0.8% of the training lncRNA transcripts get a call.
+  - Keeping 0.50 calls the annotated CDS for 0.55–0.85% fewer coding transcripts.
+- **Wiring:** the `XORF` subworkflow takes two new inputs, `skip_transaid` and `strip_truncations`. `XORF_PREDICT_ORFS` and `XORF_PREDICT_FUSION_ORFS` pass `false` and `true`.
+  - TransAID stays on, and `skip_transaid` is not exposed: that branch stages xORF's header-only TransAID table from `projectDir`, which is ARK's `src/` when xORF runs as a subworkflow.
+  - `strip_truncations` is only read when xORF polishes, which ARK does not.
+- **Other xORF fixes that ARK picks up:**
+  - `orf` stops with the tool's exit code when DIAMOND, PSAURON, orfipy or TranslationAI fail, so out-of-memory kills are retried. Before, a failed search was written as "no BLAST hit" for the whole chunk.
+  - A chunk whose ORFs all fail the length filters no longer fails the BLAST task.
+  - TransAID pads each sequence to its own length: identical scores, about 6× faster on one CPU.
+- **Older ARK versions** run `orf-predict:latest`. A fresh pull of that tag now gives the v3.2 model at their 0.50 cutoff, while a cached older `latest` image keeps the v2 model. To pin v2 there, set the PREDICT container to `ghcr.io/hillerlab/orf-predict:v0.1.3`.
+- **CI runs to the end again.** Since v2.1.4, `ARK_ALIGN_FRAGMENTS` was killed for memory (exit 137, then `samtools sort: failed to read header`).
+  - minimap2's peak memory grows with `-G`: the 52 pooled fragment reads of the test data need about 60 GB at `-G 1600k` with 4 threads, above the CI profile's 8 GB. They need 14.7 GB at 300k and 5.7 GB at 50k.
+  - The CI params now set `minimap2_realign_intron_size = "50k"`. Production keeps 1600k: 17.6–20 GB per mouse sample, within the 36 GB of `process_medium_fast`.
+  - Gold: the fragment outputs are regenerated, and the v2.1.4 acceptance files are added. Every xORF, NMD and POLISH output keeps its gold line count with the new model.
+- Version 2.1.6.
+
 ## [v2.1.5] - 2026-10-14
 
 - **New iso-segment hq defaults, from the read-filtering benchmark:** identity 98 → **95** (`isotools_segment_identity_threshold`), 5′ clip 20 → **10** (`isotools_segment_max_five_prime_clip`), and a new MAPQ rule, `isotools_segment_min_mapq = 1` (`0` disables it). The 3′ clip stays at 20.

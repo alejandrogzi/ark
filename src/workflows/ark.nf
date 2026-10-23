@@ -194,8 +194,12 @@ workflow ARK {
           params.xorf_predict_keep_raw,
           params.xorf_selenocysteine_codons,
           params.xorf_skip_netstart,
+          // INFO: xorf >= 0.2.0 skip_transaid swaps PREDICT to its no-TransAID model; ARK keeps TransAID
+          // INFO: on (that branch stages a header-only CSV from projectDir, which is ARK's src/ here)
+          false, // xorf_skip_transaid
           params.xorf_rename_deactivate,
           false, // xorf_do_polishing
+          true,  // xorf_strip_truncations (only read with polishing)
           true,  // xorf_skip_joined_concat
           false, // xorf_run_only_on
           null,  // xorf_run_only_mode
@@ -221,9 +225,11 @@ workflow ARK {
           params.xorf_predict_keep_raw,
           params.xorf_selenocysteine_codons,
           params.xorf_skip_netstart,
+          false, // xorf_skip_transaid
           params.xorf_rename_deactivate,
-          false,
-          true,
+          false, // xorf_do_polishing
+          true,  // xorf_strip_truncations (only read with polishing)
+          true,  // xorf_skip_joined_concat
           false, // xorf_run_only_on
           null,  // xorf_run_only_mode
           null,  // xorf_run_only_target
