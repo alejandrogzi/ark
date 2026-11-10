@@ -6,6 +6,8 @@ reads_corrected	0
 reads_correction_skipped	0
 chains	8
 chains_absorbed	0
+chains_subchain_merged	0
+chains_subchain_kept	0
 models_known	3
 models_novel	0
 models_mono	0

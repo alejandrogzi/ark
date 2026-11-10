@@ -18,7 +18,8 @@ process VEREDICT {
     tuple val(meta), path("veredict/*.intraprimming.bed") , optional: true, emit: intraprimming
     tuple val(meta), path("veredict/*.rt.bed")            , optional: true, emit: rt
     tuple val(meta), path("veredict/*.artifacts.bed")     , optional: true, emit: artifacts
-    env(ADDITIONAL_BED_COLUMNS)                                           , emit: additional_bed_columns
+    tuple val(meta), path("veredict/*.bed")               , emit: buckets // INFO: all seven (always written, maybe empty)
+    env(ADDITIONAL_BED_COLUMNS)                                         , emit: additional_bed_columns
     path "versions.yml"                                                   , emit: versions
 
     when:
@@ -49,6 +50,7 @@ process VEREDICT {
     stub:
     def prefix = task.ext.prefix ?: "${meta.id}"
     """
+    mkdir -p veredict
     touch veredict/${prefix}.pass.bed 
     touch veredict/${prefix}.trash.bed
     touch veredict/${prefix}.retentions.bed

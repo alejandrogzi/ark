@@ -36,6 +36,10 @@ jobs:
         if: matrix.entrypoint == 'subreads'
         run: python3 assets/ci/test_fxsplit.py
 
+      - name: Check POLISH rescue (unpredicted, artifacts)
+        if: matrix.entrypoint == 'subreads'
+        run: python3 assets/ci/test_rescue_flnc.py
+
       - name: Run pipeline
         env:
           D: "${{ github.workspace }}/assets/test_data/data"

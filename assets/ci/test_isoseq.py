@@ -331,6 +331,8 @@ workflow {
         assert len(chains) == len(expected), chains
         presets = {args[args.index("--preset") + 1] for args in chains}
         assert presets == ({"sensitive"} if entrypoint != "flnc" and engine == "isoseq" else {"balanced"}), presets
+        # reconstruct_subchain_merge / reconstruct_subchain_keep_ends default on: sub-chains merge, distinct ends stay
+        assert all(args[args.index("--subchain-merge") + 1] == "ends" for args in chains), chains
         assert not any(name == "samtools" and args[0] == "merge" for name, args, *_ in records), records
         # Every result id has one hq and one singleton chunk (only hq with engine none). With the second pass on, iso-align runs once per
         # chunk BAM with exactly the chunk FASTA minimap2 aligned it from (reads name -> BAM name).

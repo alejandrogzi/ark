@@ -160,6 +160,30 @@ process TRACKDB {
             type bigBed 12
             bigDataUrl ${browser}/${species}/${prefix}.nmd.bb
 
+            track ${prefix}.unpredicted
+            parent ${track}
+            subtrack ${track}
+            shortLabel HL unpredicted
+            longLabel HL_unpredicted (models without an ORF)
+            group genes
+            priority 1
+            visibility pack
+            itemRgb On
+            type bigBed 12
+            bigDataUrl ${browser}/${species}/${prefix}.unpredicted.bb
+
+            track ${prefix}.fusions.unpredicted
+            parent ${track}
+            subtrack ${track}
+            shortLabel HL fusions unpredicted
+            longLabel HL_fusions_unpredicted (fusion models without an ORF)
+            group genes
+            priority 1
+            visibility pack
+            itemRgb On
+            type bigBed 12
+            bigDataUrl ${browser}/${species}/${prefix}.fusions.unpredicted.bb
+
     ##########################################################
     # Isopipe bigWig track description [ spliceAi + aparent ]
     ##########################################################
