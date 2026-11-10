@@ -17,9 +17,9 @@
     "isotools_segment_max_three_prime_clip": 20,
     "xorf_chunk_size": 2,
     "xorf_predict_keep_raw": true,
-    "xorf_predict_min_score_max_predictions": -1,
+    "xorf_predict_min_score_max_predictions": 0.20,
     "xorf_predict_max_predictions": 3,
-    "xorf_predict_threshold": -1,
+    "xorf_predict_threshold": 0.20,
     "xorf_skip_netstart": true,
     "load_track": false,
     "sent_email": false

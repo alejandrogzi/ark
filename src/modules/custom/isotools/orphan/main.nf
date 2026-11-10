@@ -40,12 +40,12 @@ process ISOTOOLS_ORPHAN {
         --threads ${task.cpus} \\
         --prefix ${prefix} 
 
-    # INFO: rehydrate bed12+n
+    # INFO: rehydrate bed12+n: exact match on the name column (grep -f matched IDs as regex substrings anywhere in the line)
     if [ ! -s orphans/${prefix}.hq.bed ]; then
         rm orphans/${prefix}.hq.bed
     else
-        grep -f \\
-        <(cut -f4 orphans/${prefix}.hq.bed) ${bed} \\
+        awk -F'\t' 'NR == FNR { ids[\$4]; next } \$4 in ids' \\
+            orphans/${prefix}.hq.bed ${bed} \\
         > tmp.hq.bed && \\
         sort -k1,1 -k2,2n tmp.hq.bed >| orphans/${prefix}.hq.bed
     fi
@@ -53,8 +53,8 @@ process ISOTOOLS_ORPHAN {
     if [ ! -s orphans/${prefix}.scraps.bed ]; then
         rm orphans/${prefix}.scraps.bed
     else
-        grep -f \\
-        <(cut -f4 orphans/${prefix}.scraps.bed) ${bed} \\
+        awk -F'\t' 'NR == FNR { ids[\$4]; next } \$4 in ids' \\
+            orphans/${prefix}.scraps.bed ${bed} \\
         > tmp.scraps.bed && \\
         sort -k1,1 -k2,2n tmp.scraps.bed >| orphans/${prefix}.scraps.bed
     fi
@@ -70,6 +70,7 @@ process ISOTOOLS_ORPHAN {
     stub:
     def prefix    = task.ext.prefix ?: "${meta.id}"
     """
+    mkdir -p orphans
     touch orphans/${prefix}.hq.bed
     touch orphans/${prefix}.scraps.bed
 

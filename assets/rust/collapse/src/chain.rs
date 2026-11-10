@@ -6,7 +6,9 @@
 //! Junction wobble is corrected per strand, reads are grouped by intron chain, truncated
 //! subchains are absorbed into their best-supported parent, mono-exonic reads are absorbed,
 //! excluded as intronic or clustered, and models pass support, tail and read-fraction
-//! thresholds. Every model is a real read (its representative) tagged `#CN<n_reads>`.
+//! thresholds. With `--subchain-merge`, a kept model whose intron chain is a contiguous run of a
+//! kept longer model's chain then joins it (step 11). Every model is a real read (its
+//! representative) tagged `#CN<n_reads>`.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -15,7 +17,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use crate::cli::{ChainArgs, Preset};
+use crate::cli::{ChainArgs, Preset, SubchainMerge};
 use crate::utils::Dsu;
 
 /// An intron with this many reads never moves in junction correction.
@@ -107,6 +109,8 @@ struct Model<'a> {
     rep: usize,
     known: bool,
     protected: bool,
+    /// kept apart from a longer container by `--subchain-merge ends`
+    sub_kept: bool,
     reason: Option<&'static str>,
 }
 
@@ -311,7 +315,7 @@ fn chain<W: Write>(
         }
     }
 
-    let (mut n_chains, mut n_absorbed) = (0, 0);
+    let (mut n_chains, mut n_absorbed, mut n_sub, mut n_sub_kept) = (0, 0, 0, 0);
     let mut all: Vec<Model> = Vec::new();
     for (key, idx) in &buckets {
         let (rf, plus) = (refs.get(key).unwrap_or(&none), key.1);
@@ -572,6 +576,12 @@ fn chain<W: Write>(
                 cum += ms[m].n_reads();
             }
         }
+
+        // 11. --subchain-merge: a kept chain that is a contiguous run of a kept longer one joins it
+        if args.subchain_merge != SubchainMerge::Off {
+            let (merged, kept) = subchain_merge(&reads, &mut ms, args);
+            (n_sub, n_sub_kept) = (n_sub + merged, n_sub_kept + kept);
+        }
         all.extend(ms);
     }
 
@@ -597,10 +607,14 @@ fn chain<W: Write>(
         members().for_each(|&i| fate[i] = Ok(n + 1));
         writeln!(models_w, "{}", bed_line(r, m.n_reads()))?;
         let chain: Vec<String> = m.chain.iter().map(|(s, e)| format!("{s}-{e}")).collect();
-        let flags: Vec<&str> = [(r.corrected, "corrected"), (m.protected, "protected")]
-            .into_iter()
-            .filter_map(|(on, flag)| on.then_some(flag))
-            .collect();
+        let flags: Vec<&str> = [
+            (r.corrected, "corrected"),
+            (m.protected, "protected"),
+            (m.sub_kept, "subchain_kept"),
+        ]
+        .into_iter()
+        .filter_map(|(on, flag)| on.then_some(flag))
+        .collect();
         let or_dot = |v: String| if v.is_empty() { ".".into() } else { v };
         writeln!(
             support_w,
@@ -656,6 +670,8 @@ fn chain<W: Write>(
         ("reads_correction_skipped", reads_kept),
         ("chains", n_chains),
         ("chains_absorbed", n_absorbed),
+        ("chains_subchain_merged", n_sub),
+        ("chains_subchain_kept", n_sub_kept),
         ("models_known", models("known")),
         ("models_novel", models("novel")),
         ("models_mono", models("mono")),
@@ -816,6 +832,109 @@ fn moves(
     mv
 }
 
+/// Step 11 (`--subchain-merge`) on one (chrom, strand): a kept multi-exon model whose intron chain
+/// is a contiguous proper sub-chain of a kept longer model's chain is merged into the
+/// best-supported such container (most reads, then most introns; containers are decided first,
+/// longest chains first). Its reads become the container's partial reads and its molecules are
+/// added, so `#CN`, support.tsv and members.tsv follow. Plain merges every sub-chain, whatever
+/// its ends. `ends` skips a container when the shorter model is known (unless
+/// `--subchain-known-needs-ends`), or has `--subchain-min-end-reads` reads ending past the container
+/// on one side (`distinct`); with no other container it stays a model, flagged `subchain_kept`.
+/// Returns (merged, kept by `ends`).
+fn subchain_merge(reads: &[Read], ms: &mut Vec<Model>, args: &ChainArgs) -> (usize, usize) {
+    let live = |m: &Model| m.reason.is_none() && !m.chain.is_empty();
+    let mut by_intron: HashMap<Iv, Vec<usize>> = HashMap::new();
+    for (c, m) in ms.iter().enumerate().filter(|(_, m)| live(m)) {
+        for &iv in m.chain {
+            by_intron.entry(iv).or_default().push(c);
+        }
+    }
+    let mut order: Vec<usize> = (0..ms.len()).filter(|&c| live(&ms[c])).collect();
+    order.sort_by_key(|&c| Reverse(ms[c].chain.len()));
+    let ends = args.subchain_merge == SubchainMerge::Ends;
+    let mut merged = vec![false; ms.len()];
+    let (mut n_merged, mut n_kept) = (0, 0);
+    for a in order {
+        let (ac, k) = (ms[a].chain, ms[a].chain.len());
+        let cands = ac
+            .iter()
+            .map(|iv| &by_intron[iv])
+            .min_by_key(|v| v.len())
+            .expect("multi-exon chain");
+        let (mut best, mut exempt) = (None::<usize>, false);
+        for &b in cands {
+            let (bc, m) = (ms[b].chain, ms[b].chain.len());
+            if m <= k || merged[b] {
+                continue;
+            }
+            // introns of a chain are distinct and sorted, so A can only start at one place in B
+            let Ok(p) = bc.binary_search(&ac[0]) else {
+                continue;
+            };
+            if p + k > m || bc[p..p + k] != *ac {
+                continue;
+            }
+            let known_stays = ms[a].known && !args.subchain_known_needs_ends;
+            if ends && (known_stays || distinct(reads, &ms[a], &reads[ms[b].rep], bc, p, args)) {
+                exempt = true;
+                continue;
+            }
+            let rank = |x: usize| (ms[x].n_reads(), ms[x].chain.len());
+            if best.is_none_or(|x| rank(b) > rank(x)) {
+                best = Some(b);
+            }
+        }
+        match best {
+            Some(b) => {
+                merged[a] = true;
+                n_merged += 1;
+                let mut moved = std::mem::take(&mut ms[a].full);
+                moved.append(&mut ms[a].partial);
+                ms[b].mol += ms[a].mol;
+                ms[b].partial.extend(moved);
+            }
+            None if exempt => {
+                ms[a].sub_kept = true;
+                n_kept += 1;
+            }
+            None => {}
+        }
+    }
+    let mut gone = merged.into_iter();
+    ms.retain(|_| !gone.next().unwrap_or(false));
+
+    (n_merged, n_kept)
+}
+
+/// `--subchain-merge ends`: whether >= `--subchain-min-end-reads` reads of `a` end past its
+/// container on one side. `a`'s introns are `bc[p..]` of the container, whose representative is
+/// `r`. Where `a`'s terminal exon is an internal exon of the container, a read must reach into the
+/// container's intron by more than `--subchain-intron-tolerance` (an alternative first or last
+/// exon); where both are terminal, beyond the container's end by more than
+/// `--subchain-end-tolerance` (an alternative TSS or TES). Ends inside the container are
+/// truncations and never count.
+fn distinct(reads: &[Read], a: &Model, r: &Read, bc: &[Iv], p: usize, args: &ChainArgs) -> bool {
+    let k = a.chain.len();
+    let (it, et) = (args.subchain_intron_tolerance, args.subchain_end_tolerance);
+    let (lo, lt) = if p > 0 {
+        (bc[p - 1].1, it)
+    } else {
+        (r.start, et)
+    };
+    let (hi, ht) = if p + k < bc.len() {
+        (bc[p + k].0, it)
+    } else {
+        (r.end, et)
+    };
+    let members = || a.full.iter().chain(&a.partial).map(|&i| &reads[i]);
+    let left = members()
+        .filter(|x| x.start.saturating_add(lt) < lo)
+        .count();
+    let right = members().filter(|x| x.end > hi.saturating_add(ht)).count();
+
+    left.max(right) >= args.subchain_min_end_reads
+}
+
 /// For each query (sorted by start), the smallest tag of the intervals (sorted by start)
 /// containing it; a sweep that keeps the open intervals keyed by end.
 fn contained(ivs: &[(u32, u32, usize)], queries: &[Iv]) -> Vec<Option<usize>> {
@@ -908,6 +1027,7 @@ fn model<'a>(reads: &[Read], chain: &'a [Iv], full: Vec<usize>) -> Model<'a> {
         partial: Vec::new(),
         known: false,
         protected: false,
+        sub_kept: false,
         reason: None,
     }
 }
@@ -1069,7 +1189,7 @@ mod tests {
             o[4],
             "reads_in\t51\nreads_multi\t38\nreads_mono\t13\nsites_corrected\t2\n\
              reads_corrected\t3\nreads_correction_skipped\t0\nchains\t10\nchains_absorbed\t2\n\
-             models_known\t3\nmodels_novel\t2\nmodels_mono\t0\nexcluded_support\t3\n\
+             chains_subchain_merged\t0\nchains_subchain_kept\t0\nmodels_known\t3\nmodels_novel\t2\nmodels_mono\t0\nexcluded_support\t3\n\
              excluded_fraction\t3\nexcluded_tail\t2\nexcluded_intronic\t1\n\
              excluded_intraprimed\t10\nexcluded_junction\t0\nmodels_out\t5\ntail_rate\t0.7647\n"
         );
@@ -1161,7 +1281,7 @@ mod tests {
 
         // sensitive keeps every distinct chain and the tail-less mono cluster; intronic stays out
         let s = call(&r, &reference, &["--preset", "sensitive"]).unwrap();
-        let tail = s[4].lines().skip(8).collect::<Vec<_>>().join(" ");
+        let tail = s[4].lines().skip(10).collect::<Vec<_>>().join(" ");
         assert_eq!(
             tail,
             "models_known\t3 models_novel\t6 models_mono\t1 excluded_support\t0 excluded_fraction\t0 \
@@ -1252,5 +1372,146 @@ mod tests {
             )
         );
         assert!(o[4].contains("excluded_junction\t1\n"), "{}", o[4]);
+    }
+
+    #[test]
+    fn subchain_merge() {
+        // container B (5 reads, 5 exons); F a protected 5′ cut inside B's second exon (10 reads);
+        // G starts 48-50 bp into B's last intron (alternative first exon, 3 reads); H starts ~200 bp
+        // before B (alternative TSS, 10 reads); K is a known chain. H and K carry tails, which keep
+        // step 5 from absorbing their inner 3′ ends
+        let (t, no) = ("PA30#PR30#IY990", "PA0#PR0#IY990");
+        let (e2, e3, e4, e5) = ((1200, 1300), (1400, 1500), (1600, 1700), (1800, 2000));
+        let mut r = String::new();
+        for i in 0..5 {
+            r += &bed(
+                &format!("b{i}"),
+                '+',
+                &[(1000 + i, 1100), e2, e3, e4, e5],
+                no,
+            );
+        }
+        for i in 0..10 {
+            r += &bed(&format!("f{i}"), '+', &[(1250 + i, 1300), e3, e4, e5], no);
+            r += &bed(&format!("h{i}"), '+', &[(800 + i, 1100), e2], t);
+        }
+        for i in 0..3 {
+            r += &bed(&format!("g{i}"), '+', &[(1550 + i, 1700), (1800, 1900)], no);
+        }
+        for i in 0..2 {
+            r += &bed(&format!("k{i}"), '+', &[(1210 + i, 1300), (1400, 1450)], t);
+        }
+        let reference = bed("T1", '+', &[e2, e3], "");
+        let run = |flags: &[&str]| {
+            let flags: Vec<&str> = ["--preset", "sensitive"]
+                .iter()
+                .chain(flags)
+                .copied()
+                .collect();
+            call(&r, &reference, &flags).unwrap()
+        };
+        let fate = |o: &[String]| -> HashMap<String, String> {
+            o[2].lines()
+                .skip(1)
+                .map(|l| l.split_once('\t').unwrap())
+                .map(|(read, m)| (read.split("__").next().unwrap().into(), m.into()))
+                .collect()
+        };
+        // each model as <first letter of its representative>:<#CN>
+        let models = |o: &[String]| -> Vec<String> {
+            o[0].lines()
+                .map(|l| l.split('\t').nth(3).unwrap())
+                .map(|n| format!("{}:{}", &n[..1], n.rsplit('#').next().unwrap()))
+                .collect()
+        };
+        let count = |o: &[String], k: &str| -> String {
+            o[4].lines()
+                .find_map(|l| l.strip_prefix(&format!("{k}\t")))
+                .unwrap()
+                .into()
+        };
+
+        // off: every chain is its own model
+        let o = run(&[]);
+        assert_eq!(models(&o), ["h:CN10", "b:CN5", "k:CN2", "f:CN10", "g:CN3"]);
+        assert_eq!(count(&o, "chains_subchain_merged"), "0");
+
+        // plain: every sub-chain joins B; reads, molecules and members follow
+        let o = run(&["--subchain-merge", "plain"]);
+        assert_eq!(models(&o), ["b:CN30"]);
+        assert_eq!(
+            (
+                count(&o, "chains_subchain_merged"),
+                count(&o, "chains_subchain_kept")
+            ),
+            ("4".into(), "0".into())
+        );
+        let row: Vec<&str> = o[1].lines().nth(1).unwrap().split('\t').collect();
+        assert_eq!(&row[5..8], ["30", "30", "25"]); // n_reads, n_molecules, n_partial
+        let f = fate(&o);
+        assert_eq!((o[2].lines().count(), f.len()), (31, 30));
+        assert!(f.values().all(|m| m == "t.1"), "{f:?}");
+
+        // ends: F is a truncation and joins B; G (intron start), H (before B's start), K (known) stay
+        let o = run(&["--subchain-merge", "ends"]);
+        assert_eq!(models(&o), ["h:CN10", "b:CN15", "k:CN2", "g:CN3"]);
+        assert_eq!(
+            (
+                count(&o, "chains_subchain_merged"),
+                count(&o, "chains_subchain_kept")
+            ),
+            ("1".into(), "3".into())
+        );
+        let f = fate(&o);
+        assert_eq!(
+            ["b0", "f3", "h0", "k1", "g2"].map(|r| f[r].as_str()),
+            ["t.2", "t.2", "t.1", "t.3", "t.4"]
+        );
+        let flags: Vec<&str> = o[1]
+            .lines()
+            .skip(1)
+            .map(|l| l.rsplit('\t').next().unwrap())
+            .collect();
+        assert_eq!(
+            flags,
+            ["subchain_kept", ".", "subchain_kept", "subchain_kept"]
+        );
+
+        // known needs ends: K's reads end inside B's exons, so K joins B like F; G and H keep their ends
+        let o = run(&["--subchain-merge", "ends", "--subchain-known-needs-ends"]);
+        assert_eq!(models(&o), ["h:CN10", "b:CN17", "g:CN3"]);
+        assert_eq!(
+            (
+                count(&o, "chains_subchain_merged"),
+                count(&o, "chains_subchain_kept")
+            ),
+            ("2".into(), "2".into())
+        );
+
+        // thresholds: G's 3 reads are too few at 4; H's ~200 bp fit a 300 bp end tolerance
+        let o = run(&["--subchain-merge", "ends", "--subchain-min-end-reads", "4"]);
+        assert_eq!(models(&o), ["h:CN10", "b:CN18", "k:CN2"]);
+        let o = run(&[
+            "--subchain-merge",
+            "ends",
+            "--subchain-end-tolerance",
+            "300",
+        ]);
+        assert_eq!(models(&o), ["b:CN25", "k:CN2", "g:CN3"]);
+        // G's reads reach 50, 49 and 48 bp into B's intron: all 3 count at 47, only 2 at 48
+        let o = run(&[
+            "--subchain-merge",
+            "ends",
+            "--subchain-intron-tolerance",
+            "47",
+        ]);
+        assert_eq!(models(&o).last().unwrap(), "g:CN3");
+        let o = run(&[
+            "--subchain-merge",
+            "ends",
+            "--subchain-intron-tolerance",
+            "48",
+        ]);
+        assert_eq!(models(&o), ["h:CN10", "b:CN18", "k:CN2"]);
     }
 }

@@ -108,10 +108,57 @@ pub struct ChainArgs {
     )]
     pub junction_support: bool,
 
+    #[arg(
+        long = "subchain-merge",
+        value_enum,
+        default_value = "off",
+        help = "Merge a kept multi-exon model whose intron chain is a contiguous proper sub-chain of another kept model's chain (same chrom, strand) into it: off, plain (every one), ends (keep known chains and chains with read-supported ends the longer model does not explain)"
+    )]
+    pub subchain_merge: SubchainMerge,
+
+    #[arg(
+        long = "subchain-end-tolerance",
+        value_name = "INT",
+        default_value_t = 100,
+        help = "[--subchain-merge ends] bp a read end must reach past the longer model's matching terminal exon to count as a distinct end"
+    )]
+    pub subchain_end_tolerance: u32,
+
+    #[arg(
+        long = "subchain-intron-tolerance",
+        value_name = "INT",
+        default_value_t = 10,
+        help = "[--subchain-merge ends] bp a read end must reach into the longer model's intron to count as a distinct end"
+    )]
+    pub subchain_intron_tolerance: u32,
+
+    #[arg(
+        long = "subchain-min-end-reads",
+        value_name = "INT",
+        default_value_t = 3,
+        help = "[--subchain-merge ends] reads of the shorter model with a distinct end on the same side that keep it separate"
+    )]
+    pub subchain_min_end_reads: usize,
+
+    #[arg(
+        long = "subchain-known-needs-ends",
+        help = "[--subchain-merge ends] keep a known (reference) sub-chain separate only when its reads have distinct ends, as for a novel one; without it a known chain always stays",
+        action = ArgAction::SetTrue
+    )]
+    pub subchain_known_needs_ends: bool,
+
     // ponytail: accepted for the Nextflow contract and ignored; one [sample, chr] is
     // single-threaded work, rayon over (chrom, strand) buckets if it ever matters
     #[arg(long = "threads", value_name = "THREADS", default_value_t = 1)]
     pub threads: usize,
+}
+
+/// `collapse chain --subchain-merge`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SubchainMerge {
+    Off,
+    Plain,
+    Ends,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

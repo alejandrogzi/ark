@@ -71,12 +71,20 @@
     "xorf_custom_database": null,
     "xorf_chunk_size": 10,
     "xorf_predict_keep_raw": true,
-    "xorf_predict_min_score_max_predictions": -1,
+    "xorf_predict_min_score_max_predictions": 0.20,
     "xorf_predict_max_predictions": 3,
-    "xorf_predict_threshold": -1,
+    "xorf_predict_threshold": 0.20,
     "xorf_selenocysteine_codons": null,
     "xorf_skip_netstart": true,
     "xorf_rename_deactivate": false,
+
+    "// 7a)": "POLISH options [ isotools_intron_retention_source: query, all ] ────────────────────────────────────────",
+    "isotools_intron_retention_source": "query",
+    "polish_rescue_artifacts": true,
+    "polish_rescue_unpredicted": true,
+    "polish_rescue_annotated_introns": true,
+    "polish_rescue_categories": "retentions,truncations,intraprimming,rt,artifacts,trash,nmd,scraps",
+    "polish_rescue_min_cds_introns": 1,
 
     "// 8)": "Track upload options ────────────────────────────────────────",
     "load_track": false
