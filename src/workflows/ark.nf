@@ -144,6 +144,8 @@ workflow ARK {
           params.isotools_fragments_accept,
           params.isotools_fragments_pool,
           params.reconstruct_engine,
+          params.cluster_mode,
+          params.global_prefix,
           ch_versions
         )
 

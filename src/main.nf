@@ -40,8 +40,15 @@ def validateFullRun() {
       problems << 'isoseq_cluster2_mode was renamed to cluster_mode'
     }
 
-    if (!(params.cluster_mode in ['per_sample', 'multi_sample', 'both'])) {
-      problems << 'ERROR: Unknown cluster_mode option -> options are: per_sample, multi_sample, both'
+    if (!(params.cluster_mode in ['per_sample', 'multi_sample', 'both', 'pooled'])) {
+      problems << 'ERROR: Unknown cluster_mode option -> options are: per_sample, multi_sample, both, pooled'
+    }
+    // INFO: pooled builds one model set from every sample at reconstruction and names it global_prefix
+    if (params.cluster_mode == 'pooled' && !params.global_prefix) {
+      problems << 'cluster_mode pooled needs --global_prefix (the name of the pooled model set)'
+    }
+    if (params.cluster_mode == 'pooled' && params.reconstruct_engine == 'none') {
+      problems << 'cluster_mode pooled pools the samples at reconstruction -> it needs reconstruct_engine chain'
     }
 
     if (params.cluster_engine in ['cdhit', 'rattle'] || params.containsKey('cdhit_identity')) {

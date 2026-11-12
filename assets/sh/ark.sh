@@ -90,7 +90,7 @@ cat > "${run_dir}/params.json" <<EOF
     "global_prefix": "${prefix}",
     "global_species_name": "${species_name}",
 
-    "// 2)": "CCS / Isoseq cluster options [ clustering: per_sample, multi_sample, both ] ─────",
+    "// 2)": "CCS / Isoseq cluster options [ clustering: per_sample, multi_sample, both, pooled ] ─────",
     "ccs_chunk": 1000,
     "cluster_mode": "multi_sample",
 
@@ -128,7 +128,7 @@ cat > "${run_dir}/params.json" <<EOF
 
     "// 9)": "xORF options ────────────────────────────────────────",
     "xorf_protein_database": ${database},
-    "xorf_chunk_size": 10,
+    "xorf_chunk_size": 1000,
     "xorf_predict_keep_raw": true,
     "xorf_predict_min_score_max_predictions": -1,
     "xorf_predict_max_predictions": 3,

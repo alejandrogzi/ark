@@ -25,6 +25,7 @@ process CHAIN_COLLAPSE {
     tuple val(meta), path("*.support.tsv"), path("*.counts.tsv")    , emit: support
     tuple val(meta), path("*.members.tsv.gz"), path("*.excluded.bed"), emit: members
     tuple val(meta), path("*.rejected.bed")                       , optional: true, emit: rejected // INFO: reads dropped by --junction-support
+    tuple val(meta), path("*.samples.tsv"), path("*.introns.tsv")  , optional: true, emit: tables // INFO: collapse >= 0.1.3: support per input BED (sample); every distinct intron once
     path "versions.yml"                                           , emit: versions
 
     when:
@@ -54,6 +55,7 @@ process CHAIN_COLLAPSE {
     def prefix = task.ext.prefix ?: "${meta.id}.${meta.chr}.${meta.class}"
     """
     touch ${prefix}.models.bed ${prefix}.support.tsv ${prefix}.counts.tsv ${prefix}.excluded.bed ${prefix}.rejected.bed
+    touch ${prefix}.samples.tsv ${prefix}.introns.tsv
     echo | gzip > ${prefix}.members.tsv.gz
 
     cat <<-END_VERSIONS > versions.yml

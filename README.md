@@ -138,6 +138,17 @@ file separately; `multi_sample` concatenates all files per hq/singleton class
 into one pooled sample named `global_prefix`; `both` produces both sets. Do not
 name an input sample `global_prefix`: its reads would merge with the pool.
 
+`cluster_mode pooled` (any entrypoint; it needs `global_prefix` and
+`reconstruct_engine chain`) keeps the samples apart up to fusion detection and
+pools them where transcript models are built: one model set named
+`global_prefix` from the reads of every sample, so ORF prediction and polishing
+run once. Read names get their sample as prefix (`<sample>.<read>`), and
+`07B_RECONSTRUCT/chain/<global_prefix>/*.samples.tsv` lists the reads,
+full-chain reads and full-chain molecules of every model in each sample. With
+`reconstruct_sample_read_fraction` (default off), a novel model that falls
+below the read fraction of the pool is kept when it holds the fraction among
+the locus reads of one sample.
+
 After polyA segmentation and fusion detection, `reconstruct_engine chain`
 (default) collapses the reads of each sample and chromosome into transcript
 models by intron chain (`collapse chain`). Only models reach ORF prediction;
@@ -146,7 +157,11 @@ each keeps a real read as its representative and carries its support as
 `sensitive` only removes redundancy (every distinct chain is kept), `balanced`
 (default) needs 2 molecules per novel chain, `strict` 3. Every read ends up in
 a model or in `07B_RECONSTRUCT/chain/<sample>/*.excluded.bed` with its reason.
-`reconstruct_engine none` restores per-read ORF calling.
+With `reconstruct_cds_pool` (default off), chains that each lack support but
+hold the same reference CDS, held by no kept model, count their molecules
+together and the one with the fewest unannotated introns is kept (flag
+`cds_pooled` in `*.support.tsv`). `reconstruct_engine none` restores per-read
+ORF calling.
 
 A helper sh script is provided to run the pipeline on a SLURM cluster. See details below.
 

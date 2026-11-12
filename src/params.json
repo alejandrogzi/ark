@@ -11,7 +11,7 @@
     "global_prefix": "",
     "global_species_name": "",
 
-    "// 2)": "CCS / cluster options [ cluster_mode: per_sample, multi_sample, both; flnc pools inputs the same way | cluster_engine: none, isoseq (legacy cluster2) ] ─────",
+    "// 2)": "CCS / cluster options [ cluster_mode: per_sample, multi_sample, both, pooled (one model set from all samples, support per sample); flnc pools inputs the same way | cluster_engine: none, isoseq (legacy cluster2) ] ─────",
     "ccs_chunk": 1000,
     "skera_is_kinnex_library": false,
     "cluster_mode": "multi_sample",
@@ -69,7 +69,7 @@
 
     "// 7)": "xORF options ────────────────────────────────────────",
     "xorf_custom_database": null,
-    "xorf_chunk_size": 10,
+    "xorf_chunk_size": 1000,
     "xorf_predict_keep_raw": true,
     "xorf_predict_min_score_max_predictions": 0.20,
     "xorf_predict_max_predictions": 3,

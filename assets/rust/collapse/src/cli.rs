@@ -98,7 +98,26 @@ pub struct ChainArgs {
     )]
     pub min_read_fraction: Option<f64>,
 
-    #[arg(long = "junction-wobble", value_name = "INT", default_value_t = 5)]
+    #[arg(
+        long = "sample-read-fraction",
+        help = "With one --bed file per sample: a novel model below the read fraction of the pool stays when it holds the read fraction among the locus reads of one sample",
+        action = ArgAction::SetTrue
+    )]
+    pub sample_read_fraction: bool,
+
+    #[arg(
+        long = "cds-pool",
+        help = "Chains short of support whose representatives hold the same reference CDS, held by no kept model, count their molecules together; the chain with the fewest unannotated introns is kept",
+        action = ArgAction::SetTrue
+    )]
+    pub cds_pool: bool,
+
+    #[arg(
+        long = "junction-wobble",
+        value_name = "INT",
+        default_value_t = 2,
+        help = "bp within which a rare intron moves onto an annotated or 5x better-supported one"
+    )]
     pub junction_wobble: u32,
 
     #[arg(
