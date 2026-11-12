@@ -6,9 +6,15 @@
 //! Junction wobble is corrected per strand, reads are grouped by intron chain, truncated
 //! subchains are absorbed into their best-supported parent, mono-exonic reads are absorbed,
 //! excluded as intronic or clustered, and models pass support, tail and read-fraction
-//! thresholds. With `--subchain-merge`, a kept model whose intron chain is a contiguous run of a
+//! thresholds. A 3′ cut whose end fits a reference transcript end (`reaches`) and that the
+//! parent's own reads do not outnumber is not a truncation. A 5′ cut stays apart with a cluster
+//! of its own read starts or at the annotated 5′ end of a reference; a bare CDS start (CDS-only
+//! reference) is no TSS and keeps nothing apart (`tss`). With `--subchain-merge`, a kept model whose intron chain is a contiguous run of a
 //! kept longer model's chain then joins it (step 11). Every model is a real read (its
-//! representative) tagged `#CN<n_reads>`.
+//! representative) tagged `#CN<n_reads>`; where reads hold a reference CDS that the consensus ends
+//! cut, the representative is one of them (`cds_rep`). Each `--bed` file is one sample:
+//! `samples.tsv` has every model's support per sample (with the model's BED name, the start of its
+//! name in every later table), `introns.tsv` every distinct intron once.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -23,24 +29,31 @@ use crate::utils::Dsu;
 /// An intron with this many reads never moves in junction correction.
 const PROTECT_READS: u32 = 20;
 
+/// A model end this far inside a reference CDS end still reaches it (alignment end jitter).
+const CDS_SLACK: u32 = 5;
+
 /// Half-open genomic interval (intron or exon).
 type Iv = (u32, u32);
 
 /// Chrom, name, strand (true = +), start, end and introns of a BED12 line.
 type Bed<'a> = (&'a str, &'a str, bool, u32, u32, Vec<Iv>);
 
-const OUTPUTS: [&str; 6] = [
+const OUTPUTS: [&str; 8] = [
     "models.bed",
     "support.tsv",
     "members.tsv",
     "excluded.bed",
     "counts.tsv",
     "rejected.bed",
+    "samples.tsv",
+    "introns.tsv",
 ];
 
 /// A segmented read: its BED12 line and the iso-segment tags the caller uses.
 struct Read<'a> {
     line: &'a str,
+    /// index of the `--bed` file it came from (one file is one sample)
+    src: usize,
     chrom: &'a str,
     name: &'a str,
     plus: bool,
@@ -92,10 +105,14 @@ struct Ref {
     chains: HashSet<Vec<Iv>>,
     /// annotated introns, sorted
     introns: Vec<Iv>,
-    /// first intron in transcript orientation -> 5′ ends
-    first: HashMap<Iv, Vec<u32>>,
+    /// first intron in transcript orientation -> 5′ ends, each with whether it is a bare CDS start
+    first: HashMap<Iv, Vec<(u32, bool)>>,
+    /// last intron in transcript orientation -> 3′ ends, each with whether it is a bare CDS end
+    last: HashMap<Iv, Vec<(u32, bool)>>,
     /// single-exon transcripts, sorted
     mono: Vec<(u32, u32, usize)>,
+    /// coding rows with >= 1 intron inside the CDS: thick start, thick end, those introns
+    cds: Vec<(u32, u32, Vec<Iv>)>,
 }
 
 /// A root chain with the reads absorbed into it, or a mono-exonic cluster.
@@ -109,8 +126,12 @@ struct Model<'a> {
     rep: usize,
     known: bool,
     protected: bool,
+    /// its 3′ end fits the 3′ end of a reference transcript with the same last intron
+    ref_three: bool,
     /// kept apart from a longer container by `--subchain-merge ends`
     sub_kept: bool,
+    /// kept by `--cds-pool`
+    cds_pooled: bool,
     reason: Option<&'static str>,
 }
 
@@ -130,7 +151,8 @@ impl Model<'_> {
     }
 }
 
-/// Runs `collapse chain`, writing `<prefix>.{models.bed,support.tsv,members.tsv,excluded.bed,counts.tsv,rejected.bed}`.
+/// Runs `collapse chain`, writing
+/// `<prefix>.{models.bed,support.tsv,members.tsv,excluded.bed,counts.tsv,rejected.bed,samples.tsv,introns.tsv}`.
 pub fn run(args: ChainArgs) -> Result<(), Box<dyn Error>> {
     // ponytail: inputs are held in memory like `collapse run`; stream per chromosome if a
     // [sample, chr] ever outgrows RAM
@@ -168,7 +190,9 @@ fn chain<W: Write>(
     args: &ChainArgs,
     out: &mut [W],
 ) -> Result<(), Box<dyn Error>> {
-    let [models_w, support_w, members_w, excluded_w, counts_w, rejected_w] = out else {
+    let [models_w, support_w, members_w, excluded_w, counts_w, rejected_w, samples_w, introns_w] =
+        out
+    else {
         unreachable!("one writer per output");
     };
 
@@ -187,7 +211,7 @@ fn chain<W: Write>(
 
     // 1. parse; tags are key-based: split once on `__`, then on `#`, two-letter keys
     let mut reads = Vec::new();
-    for (path, text) in beds {
+    for (src, (path, text)) in beds.iter().enumerate() {
         for (n, line) in text.lines().enumerate() {
             if line.is_empty() || line.starts_with('#') {
                 continue;
@@ -209,6 +233,7 @@ fn chain<W: Write>(
             }
             reads.push(Read {
                 line,
+                src,
                 chrom,
                 name,
                 plus,
@@ -235,13 +260,30 @@ fn chain<W: Write>(
         }
         let (chrom, _, plus, start, end, introns) =
             parse_bed(line).map_err(|e| format!("{ref_path}:{}: {e}", n + 1))?;
+        // a transcript end that is also a thick bound has no UTR: a CDS-only row (TOGA2 projection)
+        let thick = |i: usize| line.split('\t').nth(i).and_then(|v| v.parse::<u32>().ok());
+        let (ts, te) = (thick(6).unwrap_or(0), thick(7).unwrap_or(0));
+        let (left, right) = ((start, ts < te && ts == start), (end, ts < te && te == end));
         let r = refs.entry((chrom, plus)).or_default();
+        let coding: Vec<Iv> = introns
+            .iter()
+            .filter(|iv| ts < te && iv.0 >= ts && iv.1 <= te)
+            .copied()
+            .collect();
+        if !coding.is_empty() {
+            r.cds.push((ts, te, coding));
+        }
         match (introns.first(), introns.last()) {
             (Some(&a), Some(&b)) => {
                 r.starts.extend(introns.iter().map(|i| i.0));
                 r.ends.extend(introns.iter().map(|i| i.1));
-                let (first, five) = if plus { (a, start) } else { (b, end) };
+                let ((first, five), (last, three)) = if plus {
+                    ((a, left), (b, right))
+                } else {
+                    ((b, right), (a, left))
+                };
                 r.first.entry(first).or_default().push(five);
+                r.last.entry(last).or_default().push(three);
                 r.introns.extend(&introns);
                 r.chains.insert(introns);
             }
@@ -317,8 +359,21 @@ fn chain<W: Write>(
 
     let (mut n_chains, mut n_absorbed, mut n_sub, mut n_sub_kept) = (0, 0, 0, 0);
     let mut all: Vec<Model> = Vec::new();
+    let mut introns: Vec<(&str, Iv, bool, usize, bool)> = Vec::new();
     for (key, idx) in &buckets {
         let (rf, plus) = (refs.get(key).unwrap_or(&none), key.1);
+
+        // every distinct intron of the corrected reads, once, with its reads (introns.tsv)
+        let mut seen: HashMap<Iv, usize> = HashMap::new();
+        for &i in idx {
+            for &iv in &reads[i].introns {
+                *seen.entry(iv).or_insert(0) += 1;
+            }
+        }
+        introns.extend(
+            seen.into_iter()
+                .map(|(iv, n)| (key.0, iv, plus, n, rf.introns.binary_search(&iv).is_ok())),
+        );
 
         // 3-4. group by (strand, corrected chain); molecules are counted in `model`
         let mut by_chain: HashMap<&[Iv], Vec<usize>> = HashMap::new();
@@ -335,9 +390,20 @@ fn chain<W: Write>(
         n_chains += chains.len();
         let mut ms: Vec<Model> = chains
             .into_iter()
-            .map(|(chain, full)| Model {
-                known: rf.chains.contains(chain),
-                ..model(&reads, chain, full)
+            .map(|(chain, full)| {
+                let m = model(&reads, chain, full);
+                let last = if plus {
+                    chain[chain.len() - 1]
+                } else {
+                    chain[0]
+                };
+                let ends = rf.last.get(&last);
+                Model {
+                    known: rf.chains.contains(chain),
+                    ref_three: ends.is_some_and(|v| v.iter().any(|&x| reaches(m.three, x, !plus))),
+                    rep: cds_rep(&reads, &m, rf, plus),
+                    ..m
+                }
             })
             .collect();
 
@@ -388,7 +454,11 @@ fn chain<W: Write>(
                 } else {
                     (p + k < m, p > 0)
                 };
-                if three_inner && tail {
+                // a 3′ cut stays apart with a tail-supported read, or (FLNC reads carry no tail tags)
+                // when a reference ends where it ends and B's own reads do not outnumber it
+                if three_inner
+                    && (tail || (ms[a].ref_three && ms[a].full.len() >= ms[b].full.len()))
+                {
                     continue;
                 }
                 if five_cut && *protect.get_or_insert_with(|| tss(&reads, &ms[a], rf, plus)) {
@@ -456,6 +526,77 @@ fn chain<W: Write>(
                 if lone {
                     m.reason = Some("junction");
                 }
+            }
+        }
+
+        // 7c. --cds-pool: chains short of support whose representatives hold the same reference
+        // CDS intact, held by no kept model, are one coding transcript with different UTR
+        // structures: their molecules count together and the best chain is kept
+        if args.cds_pool && !rf.cds.is_empty() {
+            let mut by_first: HashMap<Iv, Vec<usize>> = HashMap::new();
+            for (c, (_, _, coding)) in rf.cds.iter().enumerate() {
+                by_first.entry(coding[0]).or_default().push(c);
+            }
+            let holds = |r: &Read| -> Vec<usize> {
+                let ex = exons(r.start, &r.introns, r.end);
+                let mut out = Vec::new();
+                for iv in &r.introns {
+                    for &c in by_first.get(iv).map_or(&[][..], |v| v) {
+                        let (ts, te, coding) = &rf.cds[c];
+                        if r.introns
+                            .iter()
+                            .filter(|x| x.0 >= *ts && x.1 <= *te)
+                            .eq(coding)
+                            && ex.iter().any(|e| e.0 <= *ts && *ts < e.1)
+                            && ex.iter().any(|e| e.0 < *te && *te <= e.1)
+                        {
+                            out.push(c);
+                        }
+                    }
+                }
+                out
+            };
+            let mut held: HashSet<usize> = HashSet::new();
+            let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+            for (j, m) in ms.iter().enumerate().filter(|(_, m)| !m.chain.is_empty()) {
+                match m.reason {
+                    None => held.extend(holds(&reads[m.rep])),
+                    Some("support") => {
+                        for c in holds(&reads[m.rep]) {
+                            groups.entry(c).or_default().push(j);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for (c, js) in groups {
+                // a chain restored for another CDS of the group already carries this one
+                if held.contains(&c) || js.iter().any(|&j| ms[j].reason.is_none()) {
+                    continue;
+                }
+                let mut mol: Vec<Iv> = js
+                    .iter()
+                    .flat_map(|&j| &ms[j].full)
+                    .map(|&i| (reads[i].start, reads[i].end))
+                    .collect();
+                mol.sort_unstable();
+                mol.dedup();
+                if mol.len() < novel {
+                    continue;
+                }
+                let unannotated = |j: usize| {
+                    let novel = |iv: &&Iv| rf.introns.binary_search(iv).is_err();
+                    ms[j].chain.iter().filter(novel).count()
+                };
+                let best = *js
+                    .iter()
+                    .max_by_key(|&&j| (Reverse(unannotated(j)), ms[j].n_reads(), Reverse(j)))
+                    .expect("a group has a chain");
+                // it stands for a reference CDS: exempt from the read fraction like a known chain
+                ms[best].reason = None;
+                ms[best].known = true;
+                ms[best].cds_pooled = true;
+                held.insert(c);
             }
         }
 
@@ -568,12 +709,50 @@ fn chain<W: Write>(
         for mut locus in loci.into_values() {
             let total = locus.iter().map(|&m| ms[m].n_reads()).sum::<usize>() as f64;
             locus.sort_by_key(|&m| Reverse(ms[m].n_reads()));
-            let mut cum = 0;
-            for m in locus {
-                if !ms[m].known && cum as f64 >= fraction * total {
-                    ms[m].reason = Some("fraction");
+            // models with equal support share one decision: the reads of the better-supported ones
+            let (mut cum, mut before, mut tie, mut dropped) = (0, 0, usize::MAX, false);
+            for &m in &locus {
+                let n = ms[m].n_reads();
+                if n != tie {
+                    (before, tie) = (cum, n);
                 }
-                cum += ms[m].n_reads();
+                if !ms[m].known && before as f64 >= fraction * total {
+                    ms[m].reason = Some("fraction");
+                    dropped = true;
+                }
+                cum += n;
+            }
+            // --sample-read-fraction: in a pool the well-expressed isoforms of every sample add up
+            // and push a model that one sample expresses below the fraction. The same rule over
+            // the locus reads of each sample (one `--bed` file) restores what a sample keeps alone
+            if !(args.sample_read_fraction && dropped && beds.len() > 1) {
+                continue;
+            }
+            let per: Vec<Vec<usize>> = locus
+                .iter()
+                .map(|&m| {
+                    let mut n = vec![0; beds.len()];
+                    for &i in ms[m].full.iter().chain(&ms[m].partial) {
+                        n[reads[i].src] += 1;
+                    }
+                    n
+                })
+                .collect();
+            for src in 0..beds.len() {
+                let total = per.iter().map(|n| n[src]).sum::<usize>() as f64;
+                let mut order: Vec<usize> = (0..locus.len()).filter(|&x| per[x][src] > 0).collect();
+                order.sort_by_key(|&x| Reverse(per[x][src]));
+                let (mut cum, mut before, mut tie) = (0, 0, usize::MAX);
+                for x in order {
+                    let n = per[x][src];
+                    if n != tie {
+                        (before, tie) = (cum, n);
+                    }
+                    if (before as f64) < fraction * total {
+                        ms[locus[x]].reason = None; // only this step's drops are in the locus
+                    }
+                    cum += n;
+                }
             }
         }
 
@@ -611,6 +790,7 @@ fn chain<W: Write>(
             (r.corrected, "corrected"),
             (m.protected, "protected"),
             (m.sub_kept, "subchain_kept"),
+            (m.cds_pooled, "cds_pooled"),
         ]
         .into_iter()
         .filter_map(|(on, flag)| on.then_some(flag))
@@ -656,6 +836,50 @@ fn chain<W: Write>(
             Ok(n) => writeln!(members_w, "{}\t{prefix}.{n}", r.name)?,
             Err(why) => writeln!(members_w, "{}\texcluded:{why}", r.name)?,
         }
+    }
+
+    // support of every model per sample (one `--bed` file each, named by its file stem)
+    let label = |p: &str| {
+        let name = p.rsplit('/').next().unwrap_or(p);
+        name.strip_suffix(".bed").unwrap_or(name).to_string()
+    };
+    let labels: Vec<String> = beds.iter().map(|(p, _)| label(p)).collect();
+    writeln!(
+        samples_w,
+        "model\tname\tsample\tn_reads\tn_full\tn_full_molecules"
+    )?;
+    for (n, m) in kept.iter().enumerate() {
+        let line = bed_line(&reads[m.rep], m.n_reads());
+        let name = line.split('\t').nth(3).unwrap_or_default();
+        let mut per: BTreeMap<usize, (usize, Vec<Iv>)> = BTreeMap::new();
+        for &i in &m.full {
+            per.entry(reads[i].src)
+                .or_default()
+                .1
+                .push((reads[i].start, reads[i].end));
+        }
+        for &i in &m.partial {
+            per.entry(reads[i].src).or_default().0 += 1;
+        }
+        for (src, (partial, mut full)) in per {
+            let n_full = full.len();
+            full.sort_unstable();
+            full.dedup();
+            writeln!(
+                samples_w,
+                "{prefix}.{}\t{name}\t{}\t{}\t{n_full}\t{}",
+                n + 1,
+                labels[src],
+                partial + n_full,
+                full.len()
+            )?;
+        }
+    }
+    introns.sort_unstable();
+    writeln!(introns_w, "chrom\tstart\tend\tstrand\tn_reads\tannotated")?;
+    for (chrom, (s, e), plus, n, ann) in introns {
+        let strand = if plus { '+' } else { '-' };
+        writeln!(introns_w, "{chrom}\t{s}\t{e}\t{strand}\t{n}\t{}", ann as u8)?;
     }
 
     let excluded = |why: &str| fate.iter().filter(|f| **f == Err(why)).count();
@@ -838,8 +1062,9 @@ fn moves(
 /// longest chains first). Its reads become the container's partial reads and its molecules are
 /// added, so `#CN`, support.tsv and members.tsv follow. Plain merges every sub-chain, whatever
 /// its ends. `ends` skips a container when the shorter model is known (unless
-/// `--subchain-known-needs-ends`), or has `--subchain-min-end-reads` reads ending past the container
-/// on one side (`distinct`); with no other container it stays a model, flagged `subchain_kept`.
+/// `--subchain-known-needs-ends`), is a 3′ cut that step 5 keeps apart for its reference end, or has
+/// `--subchain-min-end-reads` reads ending past the container on one side (`distinct`); with no
+/// other container it stays a model, flagged `subchain_kept`.
 /// Returns (merged, kept by `ends`).
 fn subchain_merge(reads: &[Read], ms: &mut Vec<Model>, args: &ChainArgs) -> (usize, usize) {
     let live = |m: &Model| m.reason.is_none() && !m.chain.is_empty();
@@ -875,7 +1100,17 @@ fn subchain_merge(reads: &[Read], ms: &mut Vec<Model>, args: &ChainArgs) -> (usi
                 continue;
             }
             let known_stays = ms[a].known && !args.subchain_known_needs_ends;
-            if ends && (known_stays || distinct(reads, &ms[a], &reads[ms[b].rep], bc, p, args)) {
+            let three_cut = if reads[ms[a].rep].plus {
+                p + k < m
+            } else {
+                p > 0
+            };
+            let end_stays = three_cut && ms[a].ref_three && ms[a].full.len() >= ms[b].full.len();
+            if ends
+                && (known_stays
+                    || end_stays
+                    || distinct(reads, &ms[a], &reads[ms[b].rep], bc, p, args))
+            {
                 exempt = true;
                 continue;
             }
@@ -1002,14 +1237,7 @@ fn model<'a>(reads: &[Read], chain: &'a [Iv], full: Vec<usize>) -> Model<'a> {
     if best == 1 {
         three = t[t.len() / 2]; // INFO: no repeated end: the median, not the most extreme read
     }
-    let rep = *full
-        .iter()
-        .min_by_key(|&&i| {
-            let r = &reads[i];
-            let d = r.five().abs_diff(five) as u64 + r.three().abs_diff(three) as u64;
-            (d, !r.tail(), Reverse(r.iy), r.fg, r.name)
-        })
-        .expect("non-empty read set");
+    let rep = closest(reads, &full, five, three);
     let mut mol: Vec<Iv> = full
         .iter()
         .map(|&i| (reads[i].start, reads[i].end))
@@ -1027,13 +1255,73 @@ fn model<'a>(reads: &[Read], chain: &'a [Iv], full: Vec<usize>) -> Model<'a> {
         partial: Vec::new(),
         known: false,
         protected: false,
+        ref_three: false,
         sub_kept: false,
+        cds_pooled: false,
         reason: None,
     }
 }
 
+/// The read closest to both ends (ties: tail, higher IY, no FG, name).
+fn closest(reads: &[Read], idx: &[usize], five: u32, three: u32) -> usize {
+    *idx.iter()
+        .min_by_key(|&&i| {
+            let r = &reads[i];
+            let d = r.five().abs_diff(five) as u64 + r.three().abs_diff(three) as u64;
+            (d, !r.tail(), Reverse(r.iy), r.fg, r.name)
+        })
+        .expect("non-empty read set")
+}
+
+/// The representative of a multi-exon chain where the reference has a CDS-only row (no UTR, as
+/// TOGA2 projections) with the chain's first or last intron. The consensus ends can fall inside
+/// that CDS (the 3′ mode at an internal A-run, the trimmed 5′ end) although reads hold its first
+/// and last coding base. When the consensus representative misses one of them and >= 2 full-chain
+/// reads hold both, the closest of those to the consensus ends is the representative. Only the
+/// representative changes: the ends that steps 5 and 11 judge stay the consensus ends.
+fn cds_rep(reads: &[Read], m: &Model, rf: &Ref, plus: bool) -> usize {
+    let (a, b) = (m.chain[0], m.chain[m.chain.len() - 1]);
+    let (first, last) = if plus { (a, b) } else { (b, a) };
+    let bare = |ends: Option<&Vec<(u32, bool)>>| -> Vec<u32> {
+        let ends = ends.into_iter().flatten();
+        ends.filter(|x| x.1).map(|x| x.0).collect()
+    };
+    let (start, stop) = (bare(rf.first.get(&first)), bare(rf.last.get(&last)));
+    // at or upstream of a CDS start, at or downstream of a CDS end (no slack: every coding base)
+    let holds = |i: usize| {
+        let (five, three) = (reads[i].five(), reads[i].three());
+        let up = |x: &u32| if plus { five <= *x } else { five >= *x };
+        let down = |x: &u32| if plus { three >= *x } else { three <= *x };
+        (start.is_empty() || start.iter().any(up)) && (stop.is_empty() || stop.iter().any(down))
+    };
+    if (start.is_empty() && stop.is_empty()) || holds(m.rep) {
+        return m.rep;
+    }
+    let good: Vec<usize> = m.full.iter().copied().filter(|&i| holds(i)).collect();
+    if good.len() < 2 {
+        return m.rep;
+    }
+
+    closest(reads, &good, m.five, m.three)
+}
+
+/// Whether a model's 3′ end fits a reference 3′ end `x`: within 50 nt of an annotated end, or,
+/// where the reference has no UTR (`bare`: the end is its CDS stop), at or beyond it, so that the
+/// model holds that end of the CDS. `low`: beyond means a lower coordinate.
+fn reaches(end: u32, (x, bare): (u32, bool), low: bool) -> bool {
+    if !bare {
+        x.abs_diff(end) <= 50
+    } else if low {
+        end <= x.saturating_add(CDS_SLACK)
+    } else {
+        end.saturating_add(CDS_SLACK) >= x
+    }
+}
+
 /// A 5′ truncation is kept separate when >= 10 of its 5′ ends fall within a 50-nt window, or
-/// a reference shares its first intron with a 5′ end within 50 nt of its consensus 5′ end.
+/// its consensus 5′ end is within 50 nt of the annotated 5′ end of a reference with the same
+/// first intron. A bare CDS start (a reference row without a 5′ UTR) is a start codon, not a
+/// TSS, and keeps nothing apart: on S2 that protection made 613 false pass models for 24 true.
 fn tss(reads: &[Read], m: &Model, rf: &Ref, plus: bool) -> bool {
     let mut f: Vec<u32> = m.full.iter().map(|&i| reads[i].five()).collect();
     f.sort_unstable();
@@ -1046,7 +1334,7 @@ fn tss(reads: &[Read], m: &Model, rf: &Ref, plus: bool) -> bool {
         || rf
             .first
             .get(&first)
-            .is_some_and(|v| v.iter().any(|&x| x.abs_diff(m.five) <= 50))
+            .is_some_and(|v| v.iter().any(|&(x, bare)| !bare && x.abs_diff(m.five) <= 50))
 }
 
 /// The representative's first 12 columns: name without `#CN<n>`/`#SG` plus `#CN<n_reads>`
@@ -1113,17 +1401,22 @@ mod tests {
     }
 
     fn call(reads: &str, reference: &str, flags: &[&str]) -> Result<Vec<String>, Box<dyn Error>> {
+        call_beds(&[("a.bed", reads)], reference, flags)
+    }
+
+    /// `call` over several input files (one sample each).
+    fn call_beds(
+        beds: &[(&str, &str)],
+        reference: &str,
+        flags: &[&str],
+    ) -> Result<Vec<String>, Box<dyn Error>> {
         let cli = [
             "chain", "--bed", "a.bed", "--ref", "ref.bed", "--prefix", "t",
         ];
         let args = ChainArgs::parse_from(cli.iter().chain(flags));
         let mut out = vec![Vec::new(); OUTPUTS.len()];
-        chain(
-            &[("a.bed".into(), reads)],
-            ("ref.bed", reference),
-            &args,
-            &mut out,
-        )?;
+        let beds: Vec<(String, &str)> = beds.iter().map(|(p, t)| (p.to_string(), *t)).collect();
+        chain(&beds, ("ref.bed", reference), &args, &mut out)?;
         Ok(out
             .into_iter()
             .map(|o| String::from_utf8(o).unwrap())
@@ -1339,7 +1632,7 @@ mod tests {
                 "PA30#PR30#IY990",
             );
         }
-        let o = call(&ng, "", &[]).unwrap();
+        let o = call(&ng, "", &["--junction-wobble", "5"]).unwrap();
         assert!(o[4].contains("sites_corrected\t0\n"), "{}", o[4]);
         assert!(o[0].contains("\t2\t100,197\t0,303\n"), "{}", o[0]); // its own 2-read model
     }
@@ -1513,5 +1806,326 @@ mod tests {
             "48",
         ]);
         assert_eq!(models(&o), ["h:CN10", "b:CN18", "k:CN2"]);
+    }
+
+    #[test]
+    fn reference_ends() {
+        // FLNC-like reads (no tail tags) against CDS-only references (thick = bounds, as `bed` writes)
+        let no = "PA0#PR0#IY990";
+        let mut r = String::new();
+        let mut reference = String::new();
+        // 3′ cut S (5 reads, a 5′ UTR intron before reference R1's chain) ends past R1's stop inside
+        // the fourth exon of L (2 reads): S outnumbers L's own reads and stays apart
+        reference += &bed("R1", '+', &[(1000, 1100), (1200, 1300), (1400, 1500)], "");
+        let s_ex = |i: u32| [(800 + i, 900), (1000, 1100), (1200, 1300), (1400, 1560)];
+        let l_ex = |i: u32| {
+            [
+                (800 + i, 900),
+                (1000, 1100),
+                (1200, 1300),
+                (1400, 1600),
+                (1700, 1800 + 10 * i),
+            ]
+        };
+        for i in 0..5 {
+            r += &bed(&format!("s{i}"), '+', &s_ex(i), no);
+        }
+        for i in 0..2 {
+            r += &bed(&format!("l{i}"), '+', &l_ex(i), no);
+        }
+        // the same cut with fewer reads (T, 2) than the longer chain's own (M, 3) is absorbed
+        reference += &bed(
+            "R2",
+            '+',
+            &[(11000, 11100), (11200, 11300), (11400, 11500)],
+            "",
+        );
+        for i in 0..2 {
+            let t = [(11000 + i, 11100), (11200, 11300), (11400, 11560)];
+            r += &bed(&format!("t{i}"), '+', &t, no);
+        }
+        for i in 0..3 {
+            let m = [
+                (11000 + i, 11100),
+                (11200, 11300),
+                (11400, 11600),
+                (11700, 11800),
+            ];
+            r += &bed(&format!("m{i}"), '+', &m, no);
+        }
+        // 5′ cuts sharing a reference's first intron. A bare CDS start keeps nothing apart: P
+        // starts 90 bp before the CDS start of R3, Q 20 bp inside the CDS of R4, both are absorbed.
+        // R6 has a 5′ UTR: H starts 5 bp before its annotated 5′ end and stays apart
+        for (base, name, cut, five) in [
+            (21000, 'c', 'p', 21210),
+            (31000, 'd', 'q', 31320),
+            (61000, 'g', 'h', 61210),
+        ] {
+            let (e3, e4) = ((base + 500, base + 600), (base + 700, base + 900));
+            let row = bed("R", '+', &[(base + 300, base + 400), e3, e4], "");
+            reference += &if cut == 'h' {
+                bed("R", '+', &[(base + 215, base + 400), e3, e4], "")
+                    .replace("+\t61215", "+\t61300")
+            } else {
+                row
+            };
+            for i in 0..4 {
+                let c = [(base + i, base + 100), (base + 200, base + 400), e3, e4];
+                r += &bed(&format!("{name}{i}"), '+', &c, no);
+            }
+            for i in 0..2 {
+                r += &bed(
+                    &format!("{cut}{i}"),
+                    '+',
+                    &[(five + i, base + 400), e3, e4],
+                    no,
+                );
+            }
+        }
+        // the 3′ cut again on the minus strand (3′ = start): Y (5 reads) inside the second exon of Z (2)
+        reference += &bed(
+            "R5",
+            '-',
+            &[(51400, 51500), (51600, 51700), (51800, 51900)],
+            "",
+        );
+        let (e3, e4) = ((51600, 51700), (51800, 51900));
+        for i in 0..5 {
+            let y = [(51340, 51500), e3, e4, (52000, 52100 + i)];
+            r += &bed(&format!("y{i}"), '-', &y, no);
+        }
+        for i in 0..2 {
+            let z = [(51100, 51200), (51300, 51500), e3, e4, (52000, 52100 + i)];
+            r += &bed(&format!("z{i}"), '-', &z, no);
+        }
+        // each model as <first letter of its representative>:<#CN>[:<flags>]
+        let models = |o: &[String]| -> Vec<String> {
+            let flags: HashMap<&str, &str> = o[1]
+                .lines()
+                .skip(1)
+                .map(|l| l.split('\t').collect::<Vec<_>>())
+                .map(|f| (f[1], f[11]))
+                .collect();
+            o[0].lines()
+                .map(|l| l.split('\t').nth(3).unwrap())
+                .map(|n| {
+                    let rep = n.rsplit_once("#CN").unwrap().0;
+                    let cn = n.rsplit('#').next().unwrap();
+                    format!("{}:{cn}:{}", &n[..1], flags[rep])
+                })
+                .collect()
+        };
+        let o = call(&r, &reference, &[]).unwrap();
+        assert_eq!(
+            models(&o),
+            [
+                "s:CN5:.",
+                "l:CN2:.",
+                "m:CN5:.",
+                "c:CN6:.",
+                "d:CN6:.",
+                "z:CN2:.",
+                "y:CN5:.",
+                "g:CN4:.",
+                "h:CN2:protected"
+            ]
+        );
+        // step 11 keeps S for the same reason (it is not a known chain); plain merges everything
+        let o = call(&r, &reference, &["--subchain-merge", "ends"]).unwrap();
+        assert_eq!(
+            models(&o),
+            [
+                "s:CN5:subchain_kept",
+                "l:CN2:.",
+                "m:CN5:.",
+                "c:CN6:.",
+                "d:CN6:.",
+                "z:CN2:.",
+                "y:CN5:subchain_kept",
+                "g:CN4:.",
+                "h:CN2:protected,subchain_kept"
+            ]
+        );
+        let o = call(&r, &reference, &["--subchain-merge", "plain"]).unwrap();
+        assert_eq!(
+            models(&o),
+            ["l:CN7:.", "m:CN5:.", "c:CN6:.", "d:CN6:.", "z:CN7:.", "g:CN6:."]
+        );
+
+        // 3′: an annotated end (UTR) fits within 50 nt; a bare CDS stop fits when the model reaches it
+        assert!(reaches(1050, (1000, false), true) && !reaches(1051, (1000, false), true));
+        assert!(reaches(900, (1000, true), true) && reaches(1005, (1000, true), true));
+        assert!(!reaches(1006, (1000, true), true));
+        assert!(reaches(1100, (1000, true), false) && !reaches(994, (1000, true), false));
+
+        // read fraction: U, V and W tie at 2 reads behind X (16 of 22 locus reads); they are kept
+        // or dropped together, whatever their order
+        let mut r = String::new();
+        for i in 0..16 {
+            let x = [(41000 + i, 41100), (41200, 41300), (41400, 41500)];
+            r += &bed(&format!("x{i}"), '+', &x, no);
+        }
+        for (name, acceptor) in [('u', 41210), ('v', 41220), ('w', 41230)] {
+            for i in 0..2 {
+                let e = [(41000 + i, 41100), (acceptor, 41300), (41400, 41500)];
+                r += &bed(&format!("{name}{i}"), '+', &e, no);
+            }
+        }
+        let o = call(&r, "", &["--min-read-fraction", "0.9"]).unwrap();
+        assert_eq!(models(&o), ["u:CN2:.", "v:CN2:.", "w:CN2:.", "x:CN16:."]);
+        let o = call(&r, "", &["--min-read-fraction", "0.7"]).unwrap();
+        assert_eq!(models(&o), ["x:CN16:."]);
+        assert!(o[4].contains("excluded_fraction\t6\n"), "{}", o[4]);
+
+        // --sample-read-fraction: sample b expresses U (3 of its 6 locus reads); the 20 reads of X
+        // in the pool put U below the fraction, the rule within sample b keeps it. V (one read in
+        // each sample) is below the fraction in the pool and in both samples.
+        let x = |i: u32| [(51000 + i, 51100), (51200, 51300), (51400, 51500)];
+        let alt = |i: u32, acceptor: u32| [(51000 + i, 51100), (acceptor, 51300), (51400, 51500)];
+        let (mut a, mut b) = (String::new(), String::new());
+        for i in 0..20 {
+            *(if i < 18 { &mut a } else { &mut b }) += &bed(&format!("x{i}"), '+', &x(i), no);
+        }
+        for i in 0..3 {
+            b += &bed(&format!("u{i}"), '+', &alt(i, 51210), no);
+        }
+        a += &bed("v0", '+', &alt(0, 51220), no);
+        b += &bed("v1", '+', &alt(1, 51220), no);
+        let pool = [("a.bed", a.as_str()), ("b.bed", b.as_str())];
+        let o = call_beds(&pool, "", &["--min-read-fraction", "0.8"]).unwrap();
+        assert_eq!(models(&o), ["x:CN20:."]);
+        let flags = ["--min-read-fraction", "0.8", "--sample-read-fraction"];
+        let o = call_beds(&pool, "", &flags).unwrap();
+        assert_eq!(models(&o), ["u:CN3:.", "x:CN20:."]);
+        assert!(o[4].contains("excluded_fraction\t2\n"), "{}", o[4]);
+        // one input file: the flag changes nothing
+        let one = a.clone() + &b;
+        let o = call_beds(&[("a.bed", one.as_str())], "", &flags).unwrap();
+        assert_eq!(models(&o), ["x:CN20:."]);
+    }
+
+    #[test]
+    fn cds_pool() {
+        // U (one molecule, a PCR twin) and W (one read) hold the CDS of reference R behind
+        // different 5′ UTR introns; each is short of support, together they are two molecules,
+        // and U has fewer unannotated introns
+        let no = "PA0#PR0#IY990";
+        let cds = [(70300, 70400), (70500, 70600), (70700, 70900)];
+        let reference = bed("R", '+', &cds, "");
+        let tail = [(70200, 70400), (70500, 70600), (70700, 70950)];
+        let mut r = String::new();
+        for i in 0..2 {
+            let u = [&[(70000, 70100)][..], &tail[..]].concat();
+            r += &bed(&format!("u{i}"), '+', &u, no);
+        }
+        let w = [&[(69800, 69900), (70010, 70100)][..], &tail[..]].concat();
+        r += &bed("w0", '+', &w, no);
+        // each model as <first letter of its representative>:CN<reads>:<flags>
+        let models = |o: &[String]| -> Vec<String> {
+            let support = o[1]
+                .lines()
+                .skip(1)
+                .map(|l| l.split('\t').collect::<Vec<_>>());
+            let names = o[0].lines().map(|l| l.split('\t').nth(3).unwrap());
+            names
+                .zip(support)
+                .map(|(n, f)| format!("{}:CN{}:{}", &n[..1], f[5], f[11]))
+                .collect()
+        };
+        let o = call(&r, &reference, &[]).unwrap();
+        assert_eq!(models(&o), [""; 0]);
+        let o = call(&r, &reference, &["--cds-pool"]).unwrap();
+        assert_eq!(models(&o), ["u:CN2:cds_pooled"]);
+        assert!(o[4].contains("models_known\t1\n") && o[4].contains("excluded_support\t1\n"));
+        // one molecule in all is not enough
+        let one: String = r.lines().take(2).map(|l| format!("{l}\n")).collect();
+        let o = call(&one, &reference, &["--cds-pool"]).unwrap();
+        assert_eq!(models(&o), [""; 0]);
+    }
+
+    #[test]
+    fn reference_cds_representative() {
+        // CDS-only references (thick = bounds); FLNC-like reads in two input files (two samples)
+        let no = "PA0#PR0#IY990";
+        let (mut a, mut b) = (String::new(), String::new());
+        let mut reference = String::new();
+        // A (+): six reads end at an A-run 20 bp before the stop of RA, two reach past it. The 3′
+        // mode stays the consensus end, the representative is the closer of the two that hold the CDS
+        reference += &bed("RA", '+', &[(1000, 1100), (1200, 1300), (1400, 1500)], "");
+        let ex = |s: u32, e: u32| [(s, 1100), (1200, 1300), (1400, e)];
+        for i in 0..5 {
+            a += &bed(&format!("a{i}"), '+', &ex(990 + i, 1480), no);
+        }
+        b += &bed("a5", '+', &ex(990, 1480), no);
+        b += &bed("h0", '+', &ex(990, 1520), no);
+        b += &bed("h1", '+', &ex(991, 1530), no);
+        // B (-, 5′ = end): the trimmed 5′ end falls 20 bp inside the CDS of RB, two reads reach its start
+        reference += &bed("RB", '-', &[(2000, 2100), (2200, 2300), (2400, 2500)], "");
+        let ex = |e: u32| [(1990, 2100), (2200, 2300), (2400, e)];
+        a += &bed("g0", '-', &ex(2510), no);
+        a += &bed("g1", '-', &ex(2505), no);
+        for i in 0..18 {
+            a += &bed(&format!("n{i}"), '-', &ex(2480), no);
+        }
+        // C (+): as A with one read past the stop of RC: one read is no evidence, nothing changes
+        reference += &bed(
+            "RC",
+            '+',
+            &[(11000, 11100), (11200, 11300), (11400, 11500)],
+            "",
+        );
+        let ex = |s: u32, e: u32| [(s, 11100), (11200, 11300), (11400, e)];
+        for i in 0..5 {
+            a += &bed(&format!("c{i}"), '+', &ex(10990 + i, 11480), no);
+        }
+        a += &bed("k0", '+', &ex(10990, 11520), no);
+        // D: a novel chain with one read in each sample
+        a += &bed("d0", '+', &[(30000, 30100), (30200, 30300)], no);
+        b += &bed("d1", '+', &[(30001, 30100), (30200, 30300)], no);
+
+        let o = call_beds(&[("x/a.bed", &a), ("b.bed", &b)], &reference, &[]).unwrap();
+        let col = |text: &str, cols: &[usize]| -> Vec<String> {
+            text.lines()
+                .map(|l| l.split('\t').collect::<Vec<_>>())
+                .map(|f| cols.iter().map(|&c| f[c]).collect::<Vec<_>>().join(" "))
+                .collect()
+        };
+        assert_eq!(
+            col(&o[0], &[1, 2, 3, 5]),
+            [
+                "990 1520 h0__FC0#TC0#PA0#PR0#IY990#CN8 +",
+                "1990 2505 g1__FC0#TC0#PA0#PR0#IY990#CN20 -",
+                "10990 11480 c0__FC0#TC0#PA0#PR0#IY990#CN6 +",
+                "30000 30300 d0__FC0#TC0#PA0#PR0#IY990#CN2 +",
+            ]
+        );
+        // five_prime / three_prime are still the consensus ends
+        assert_eq!(
+            col(&o[1], &[0, 4, 9, 10])[1..],
+            [
+                "t.1 known 990 1480",
+                "t.2 known 2480 1990",
+                "t.3 known 10990 11480",
+                "t.4 novel 30000 30300",
+            ]
+        );
+        assert_eq!(
+            o[6],
+            "model\tname\tsample\tn_reads\tn_full\tn_full_molecules\n\
+             t.1\th0__FC0#TC0#PA0#PR0#IY990#CN8\ta\t5\t5\t5\n\
+             t.1\th0__FC0#TC0#PA0#PR0#IY990#CN8\tb\t3\t3\t3\n\
+             t.2\tg1__FC0#TC0#PA0#PR0#IY990#CN20\ta\t20\t20\t3\n\
+             t.3\tc0__FC0#TC0#PA0#PR0#IY990#CN6\ta\t6\t6\t6\n\
+             t.4\td0__FC0#TC0#PA0#PR0#IY990#CN2\ta\t1\t1\t1\n\
+             t.4\td0__FC0#TC0#PA0#PR0#IY990#CN2\tb\t1\t1\t1\n"
+        );
+        assert_eq!(
+            o[7],
+            "chrom\tstart\tend\tstrand\tn_reads\tannotated\n\
+             chr1\t1100\t1200\t+\t8\t1\nchr1\t1300\t1400\t+\t8\t1\n\
+             chr1\t2100\t2200\t-\t20\t1\nchr1\t2300\t2400\t-\t20\t1\n\
+             chr1\t11100\t11200\t+\t6\t1\nchr1\t11300\t11400\t+\t6\t1\n\
+             chr1\t30100\t30200\t+\t2\t0\n"
+        );
     }
 }

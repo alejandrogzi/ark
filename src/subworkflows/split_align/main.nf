@@ -35,6 +35,7 @@ include { FASTX_CONCAT as FASTX_CONCAT_FRAGMENTS } from '../../modules/custom/fa
 include { COLLAPSE as COLLAPSE_TWINS } from '../../modules/custom/collapse/main.nf'
 
 include { RECONSTRUCT } from '../reconstruct/main.nf'
+include { GAWK_POOL } from '../../modules/custom/gawk/pool/main.nf'
 
 /*
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -59,6 +60,8 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
       fragments_accept         // bool: a realigned read replaces its pass-1 records only if accepted
       fragments_pool           // bool: realign the fragment reads of all chunks of a sample in one task
       reconstruct_engine       // string [ chain, none ]
+      cluster_mode             // string [ per_sample, multi_sample, both, pooled ]; only pooled changes this subworkflow
+      prefix                   // string (global_prefix: id of the pooled model set)
       ch_versions              // [ meta, versions.yml ]
 
     main:
@@ -483,11 +486,52 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
       // INFO: collapsed into models per [ sample_id, chr ] (meta.class keeps the two apart)
       ch_free_reads   = ISOTOOLS_FUSION_DETECTOR.out.free_fusion
       ch_fusion_reads = ISOTOOLS_FUSION_DETECTOR.out.fusion
+      ch_evidence     = ISOTOOLS_FUSION_DETECTOR.out.free_fusion
       ch_support      = Channel.empty()
+      if (cluster_mode == 'pooled' && (reconstruct_engine == 'none' || !prefix)) {
+        error "ERROR: cluster_mode pooled pools the samples at reconstruction: it needs a reconstruct_engine and --global_prefix"
+      }
       if (reconstruct_engine != 'none') {
+        ch_free_reads.map { meta, bed -> [ meta + [ class: 'free' ], bed ] }
+          .mix(ch_fusion_reads.map { meta, bed -> [ meta + [ class: 'fusion' ], bed ] })
+          .set { ch_reconstruct_in }
+
+        // INFO: cluster_mode pooled: the samples meet here. Alignment, segmentation and fusion detection ran
+        // INFO: per sample; one model set per [ chr, class ] is built from the reads of every sample and
+        // INFO: flows on as one sample named global_prefix. collapse chain gets one BED per sample, so
+        // INFO: samples.tsv has every model's support in each sample.
+        if (cluster_mode == 'pooled') {
+          ch_reconstruct_in
+            .map { meta, bed -> [ [ meta.chr, meta.class ], meta, bed ] }
+            .groupTuple(by: 0)
+            .map { key, metas, beds ->
+                // INFO: sorted by sample id: channel order is not a guarantee
+                def order = (0..<metas.size()).toList().sort { a, b -> metas[a].id <=> metas[b].id }
+                def meta = [
+                    id:         prefix,
+                    single_end: true,
+                    chr:        key[0],
+                    clustered:  metas.any { it.clustered },
+                    class:      key[1],
+                    samples:    order.collect { metas[it].id }
+                ]
+                [ meta, order.collect { beds[it] } ]
+            }
+            .set { ch_pool_in }
+
+          GAWK_POOL(ch_pool_in)
+          ch_versions = ch_versions.mix(GAWK_POOL.out.versions)
+
+          // INFO: meta.samples is dropped: downstream metas are [ id, single_end, chr, clustered ] in every mode
+          ch_reconstruct_in = GAWK_POOL.out.tagged
+            .map { meta, beds -> [ meta.findAll { k, v -> k != 'samples' }, beds ] }
+          ch_evidence = GAWK_POOL.out.pooled
+            .filter { meta, bed -> meta.class == 'free' }
+            .map { meta, bed -> [ meta.findAll { k, v -> !(k in ['samples', 'class']) }, bed ] }
+        }
+
         RECONSTRUCT(
-          ch_free_reads.map { meta, bed -> [ meta + [ class: 'free' ], bed ] }
-            .mix(ch_fusion_reads.map { meta, bed -> [ meta + [ class: 'fusion' ], bed ] }),
+          ch_reconstruct_in,
           ch_reference_transcripts,
           reconstruct_engine
         )
@@ -519,7 +563,7 @@ workflow SPLIT_ALIGN_CLEAN_CHUNKS {
     emit:
       reads    = ch_free_reads                              // models (chain) or reads (none)
       fusions  = ch_fusion_reads                            // fusion models (chain) or reads (none)
-      evidence = ISOTOOLS_FUSION_DETECTOR.out.free_fusion   // uncollapsed free reads (intron frequencies)
+      evidence = ch_evidence                                // uncollapsed free reads (intron frequencies)
       support  = ch_support                                 // [ meta, support.tsv, counts.tsv ]
       versions = ch_versions
 }

@@ -15,14 +15,15 @@ include { FASTX_CONCAT } from '../../modules/custom/fastx/concat/main.nf'
 workflow POOL_READS {
     take:
       ch_reads  // [ meta, fastx ]; meta carries sample_id + singleton (+ clustered) (flnc file channeling)
-      mode      // string [ per_sample, multi_sample, both ]
+      mode      // string [ per_sample, multi_sample, both, pooled ]
       prefix    // string (global_prefix: sample_id of the pooled branch)
 
     main:
       ch_versions = Channel.empty()
       ch_out = Channel.empty()
 
-      if (mode in ['per_sample', 'both']) {
+      // INFO: pooled keeps the reads per sample: its pool is made at reconstruction (SPLIT_ALIGN)
+      if (mode in ['per_sample', 'both', 'pooled']) {
           ch_out = ch_out.mix(ch_reads)
       }
 

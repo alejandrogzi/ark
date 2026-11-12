@@ -96,6 +96,12 @@ elif name == 'collapse' and args[0] == 'chain':
     shutil.copyfile(option('--bed').split(',')[0], option('--prefix') + '.models.bed')
     for suffix in ('.support.tsv', '.counts.tsv', '.members.tsv', '.excluded.bed'):
         Path(option('--prefix') + suffix).touch()
+elif name == 'gawk':
+    # GAWK_POOL: the read names of one sample's BED get the sample as prefix
+    sample = option('-v').removeprefix('s=')
+    for line in Path(args[-1]).read_text().splitlines():
+        fields = line.split('\t')
+        print('\t'.join(fields[:3] + [f'{sample}.{fields[3]}'] + fields[4:]))
 elif name == 'fxsplit':
     # Real chunk names carry the --suffix (meta.id), so every chunk FASTA has a distinct staged name.
     Path('chunks').mkdir()
@@ -157,7 +163,7 @@ with tempfile.TemporaryDirectory(prefix="ark-isoseq-") as temporary:
     temporary = Path(temporary)
     binary = temporary / "bin"
     binary.mkdir()
-    for name in ("pbindex", "lima", "isoseq", "samtools", "iso-fastx", "collapse", "fxsplit", "minimap2", "iso-cigar",
+    for name in ("pbindex", "lima", "isoseq", "samtools", "iso-fastx", "collapse", "gawk", "fxsplit", "minimap2", "iso-cigar",
                  "iso-align", "iso-segment", "iso-fusion", "splicetransformer", "spliceai", "wigToBigWig", "bigtools",
                  "splicing"):
         executable = binary / name
@@ -211,7 +217,7 @@ workflow {
     SPLIT_ALIGN_CLEAN_CHUNKS(reads, Channel.value(file("${projectDir}/genome.fa")),
         Channel.value([[:], file("${projectDir}/genome.mmi")]), Channel.value([[:], file("${projectDir}/annotation.bed")]),
         Channel.value([[:], []]), params.aligner, false, false, false, params.cigar, params.aligner == 'ark', false,
-        params.accept, params.pool, params.reconstruct_engine, Channel.empty())
+        params.accept, params.pool, params.reconstruct_engine, params.cluster_mode, 'pooled', Channel.empty())
     SPLIT_ALIGN_CLEAN_CHUNKS.out.reads.view { meta, bed -> 'RESULT\\t' + meta.id }
 }
 """.replace("REPO", str(ROOT)))
@@ -223,6 +229,7 @@ workflow {
     # cigar None: mm2, second pass off. True/False: ark, second pass on, cigar extension on/off.
     # flnc honors the cluster mode through POOL_READS; "per_sample" only makes `expected` below the per-sample ids.
     # Engine (5th field; default isoseq): none aligns refined reads directly (SAMTOOLS_FASTA + POOL_READS).
+    # Mode pooled: every sample is aligned alone and the samples meet at reconstruction (one result, 'pooled').
     for entrypoint, mode, pairs, cigar, *engine in (
             ("refine", "per_sample", isoseqx, None), ("refine", "multi_sample", isoseqx, None),
             ("refine", "both", isoseqx, None), ("refine", "per_sample", isoseqx[:1], None),
@@ -231,6 +238,8 @@ workflow {
             ("refine", "multi_sample", isoseqx, True), ("refine", "per_sample", isoseqx, True),
             ("flnc", "per_sample", isoseqx, True), ("flnc", "per_sample", isoseqx, False),
             ("flnc", "multi_sample", isoseqx, True), ("flnc", "both", isoseqx, True),
+            ("flnc", "pooled", isoseqx, True), ("refine", "pooled", isoseqx, None),
+            ("refine", "pooled", isoseqx, None, "none"),
             ("cluster", "both", isoseqx, None, "none"), ("refine", "per_sample", isoseqx, None, "none"),
             ("ccs", "multi_sample", isoseqx, None, "none"), ("flnc", "per_sample", isoseqx, True, "isoseq", "accept"),
             ("flnc", "per_sample", isoseqx, True, "isoseq", "accept", "pool")):
@@ -287,8 +296,10 @@ workflow {
                                 stderr=subprocess.STDOUT, timeout=120)
         assert result.returncode == 0, result.stdout
         actual = {line.split("\t")[1] for line in result.stdout.splitlines() if line.startswith("RESULT\t")}
-        expected = (samples if mode != "multi_sample" else set()) | ({"pooled"} if mode != "per_sample" else set())
+        expected = (samples if mode in ("per_sample", "both") else set()) | ({"pooled"} if mode != "per_sample" else set())
         assert actual == expected, (actual, expected, result.stdout)
+        # ids that are aligned and segmented: with mode pooled the samples, whose reads meet only at reconstruction
+        branches = samples if mode == "pooled" else expected
         if entrypoint == "flnc":
             # Pooled items carry sample_id 'pooled' with ids distinct from per-sample ones;
             # pooled bytes are exactly the member files concatenated in sorted-name order.
@@ -303,7 +314,7 @@ workflow {
                     sample = re.sub(r"(?:\.(?:hq|singletons))?\.fast[aq](?:\.gz)?$", "", name)
                     assert by_id.get(per_sample_id) == (sample, kind == "singletons", len(file_bytes[name])), (by_id, name)
             pooled_ids = {"pooled.pooled", "pooled.pooled.singletons"}
-            if mode == "per_sample":
+            if mode in ("per_sample", "pooled"):
                 assert not (set(by_id) & pooled_ids), by_id
             else:
                 for kind, cls in (("hq", ""), ("singletons", ".singletons")):
@@ -318,7 +329,7 @@ workflow {
         refine = [args for name, args, *_ in records if name == "isoseq" and args[0] == "refine"]
         cluster = [args for name, args, *_ in records if name == "isoseq" and args[0] == "cluster2"]
         assert len(refine) == (len(pairs) if entrypoint in ("refine", "ccs") else 0), refine
-        assert len(cluster) == (len(expected) if entrypoint != "flnc" and engine == "isoseq" else 0), cluster
+        assert len(cluster) == (len(branches) if entrypoint != "flnc" and engine == "isoseq" else 0), cluster
         assert sum(name == "lima" for name, *_ in records) == (entrypoint == "ccs")
         assert sum(name == "pbindex" for name, *_ in records) == (
             (entrypoint == "refine" or (entrypoint == "cluster" and engine == "isoseq")) and len(pairs) > 1)
@@ -329,6 +340,19 @@ workflow {
         # cluster2 records are clustered, so they keep every chain (sensitive preset).
         chains = [args for name, args, *_ in records if name == "collapse" and args[0] == "chain"]
         assert len(chains) == len(expected), chains
+        pools = [(args, cwd) for name, args, cwd in records if name == "gawk"]
+        if mode == "pooled":
+            # one BED per sample, named after it, with read names <sample>.<read>; the stub model is the first one
+            (chain,) = chains
+            assert chain[chain.index("--bed") + 1].split(",") == [f"beds/{sample}.bed" for sample in sorted(samples)], chain
+            assert len(pools) == len(samples) and len({cwd for _, cwd in pools}) == 1, pools
+            for bed in case.rglob("pooled.chr1.free.models.bed"):
+                assert bed.read_text() == f"chr1\t0\t4\t{min(samples)}.r1\n", bed.read_text()
+            evidence = list(case.rglob("pooled.chr1.free.pooled.bed"))
+            assert evidence and all(e.read_text() == "".join(f"chr1\t0\t4\t{sample}.r1\n" for sample in sorted(samples))
+                                    for e in evidence), evidence
+        else:
+            assert not pools, pools
         presets = {args[args.index("--preset") + 1] for args in chains}
         assert presets == ({"sensitive"} if entrypoint != "flnc" and engine == "isoseq" else {"balanced"}), presets
         # reconstruct_subchain_merge / reconstruct_subchain_keep_ends default on: sub-chains merge, distinct ends stay
@@ -344,7 +368,7 @@ workflow {
         found = sorted((args[args.index("--bam") + 1], args[args.index("--reads") + 1])
                        for name, args, *_ in records if name == "iso-align" and "--realigned-bam" not in args)
         suffix = ".extended.bam" if cigar else ".bam"
-        assert len(chunks) == (1 if engine == "none" else 2) * len(expected) * (2 if pool else 1), chunks  # none: no singleton class
+        assert len(chunks) == (1 if engine == "none" else 2) * len(branches) * (2 if pool else 1), chunks  # none: no singleton class
         assert found == (sorted((sam + suffix, reads) for reads, sam in chunks.items()) if cigar is not None else []), (found, chunks)
         # Acceptance: per chunk, iso-align compares the pass-1 BAM (not the iso-cigar BAM) with the fragments BAM;
         # samtools drops the accepted reads from the base (iso-cigar) BAM and keeps only them in the fragments BAM;

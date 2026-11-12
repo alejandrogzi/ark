@@ -36,7 +36,7 @@ workflow ISOSEQ {
       global_input_dir       // path
       global_primers         // path
       ccs_chunk              // int
-      cluster_mode           // string [ per_sample, multi_sample, both ]
+      cluster_mode           // string [ per_sample, multi_sample, both, pooled ]
       cluster_engine         // string [ none, isoseq ]
       prefix                 // string
       entrypoint             // [ subreads, ccs, refine, cluster ] (flnc unreachable)
@@ -272,10 +272,11 @@ workflow ISOSEQ {
 
       // Refine each sample once; only clustering needs separate and pooled branches.
       // INFO: per_sample clusters each sample alone; multi_sample pools all samples into one set named global_prefix;
+      // INFO: pooled clusters like per_sample (its pool is made at reconstruction, in SPLIT_ALIGN);
       // INFO: both runs the two from the same refined reads. BAM_TO_FA splits each result into hq and singletons
       // INFO: and adds meta.singleton (false / true); meta.sample_id is set later in SPLIT_ALIGN (falls back to id).
       ch_pbccs_merged_flnc_clustered_fa = Channel.empty()
-      if (cluster_engine == 'isoseq' && cluster_mode in ['per_sample', 'both']) {
+      if (cluster_engine == 'isoseq' && cluster_mode in ['per_sample', 'both', 'pooled']) {
         ISOSEQ_CLUSTER2(ch_refined_bams) // INFO: cluster reads, one task per sample id
         BAM_TO_FA(ISOSEQ_CLUSTER2.out.bam)
 

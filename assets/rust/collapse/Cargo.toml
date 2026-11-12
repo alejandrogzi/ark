@@ -1,6 +1,6 @@
 [package]
 name = "collapse"
-version = "0.1.2"
+version = "0.1.3"
 authors = ["alejandrogzi <alejandrxgzi@gmail.com>"]
 edition = "2021"
 license = "MIT"

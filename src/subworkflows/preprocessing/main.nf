@@ -43,7 +43,7 @@ workflow PREPROCESSING {
       genome                 // path
       annotation             // path
       ccs_chunk              // int
-      cluster_mode           // string [ per_sample, multi_sample, both ]
+      cluster_mode           // string [ per_sample, multi_sample, both, pooled ]
       cluster_engine         // string [ none, isoseq ]
       flnc_input_state       // string [ auto, ccs, fl, flnc, mixed, clustered ]
       protein_database       // path
