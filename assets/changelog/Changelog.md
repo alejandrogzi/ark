@@ -55,6 +55,74 @@
 
 # Changelog
 
+## [v2.1.8] - 2026-11-12
+
+- **`collapse chain` 0.1.3: reference 3′ ends decide what is a 3′ truncation; a reference start codon no longer keeps a 5′ cut apart; junction wobble 5 → 2 bp; read-fraction ties.** `reconstruct_junction_wobble = 5` restores the old wobble; the other three changes are not optional.
+  - **Why (audit of the chain caller at 07B on S2 and mouse B31: every production `CHAIN_COLLAPSE` task rerun, and the reads carrying each truth chain followed through `members.tsv`):** of the GENCODE chains carried whole by ≥ 2 reads on B31, v2.1.7 kept 84.4%. It folded 7.5% into a longer model, dropped 5.3% by read fraction and rewrote 2.1% by junction correction.
+  - **3′ cuts (step 5, and `ends` in step 11).** A chain whose 3′ end lies inside an exon of a longer chain was absorbed unless one of its reads had a polyA tail (`PA ≥ 20`). FLNC reads carry no tail tag (4 of 3.6 M reads on B31), so the guard never fired.
+    - On B31, 439 reference chains holding 134,821 reads were absorbed into a longer chain with at least 2× fewer full-length reads of its own (a median of 99 reads against 1). Their 3′ ends are polyA sites like those of kept models (PAS hexamer 65% vs 69%, GENCODE end within 50 nt 82% vs 81%). The longer chain has an intron after the stop codon, so 426 of the 439 models ended in `nmd`, and the reference CDS reached pass for 6% of them, against 79% of reference chains kept as models.
+    - **Rule:** a 3′ cut is not absorbed, and not merged by `ends`, when its 3′ end fits the 3′ end of a reference transcript with the same last intron and it has at least as many full-chain reads as the longer chain has of its own. `plain` still merges everything.
+  - **5′ cuts (step 5).** A 5′ cut stayed apart when a reference with the same first intron had its 5′ end within 50 nt. A reference row without a 5′ UTR (TOGA2 projections: thick start = transcript start) ends at the start codon, so this protected reads truncated near the ATG. Reference-chain models that start inside the reference CDS start at a refTSS peak in 20–24% of cases (below 10 reads), against 66–70% of those that reach the CDS start.
+    - **Rule:** a start codon is not a TSS and keeps nothing apart. A 5′ cut stays apart with ≥ 10 of its own read starts within 50 nt (unchanged), or within 50 nt of the 5′ end of a reference row that has a 5′ UTR (unchanged; no benchmark reference has such rows).
+    - A first form kept the cuts that reach the start codon (5 nt of slack). It went through ORF calling and POLISH and was dropped: on S2 it brought 60 new pass CDSs, 6 of them truth, and with no start-codon protection at all S2 pass precision rises by 2.5 points (table below).
+  - **How a 3′ end fits a reference 3′ end** (decided per reference row):
+    - the reference has a 3′ UTR: within 50 nt of the annotated end;
+    - the reference ends at its stop codon: the model reaches it (5 nt of slack), so it holds that end of the CDS.
+  - **Junction wobble 2 bp** (`--junction-wobble`, was 5). At 5 bp, junction correction rewrote 1,863 GENCODE chains on B31. Of the 1,748 that differ in one intron, 34% are 3-nt shifts (mostly NAGNAG acceptors), 35% 4 nt and 20% 5 nt. Turning it down costs no precision on S2 or on the SIRVs. Corrected sites: 3,619 → 383 on B31, 379 → 65 on S2.
+  - **Read fraction ties.** Models with equal support now share one decision: a novel model is dropped when the models with more reads already cover `min_read_fraction` of the locus. Before, among equally supported models the first in genomic order were kept and the rest dropped.
+  - **07B effect** (v2.1.7 → this version, same inputs, `balanced` + `ends`):
+
+    | | S2 models | S2 Sn | S2 nrPr | S2 FP | B31 models | B31 GENCODE chains kept | B31 HC chains kept | B31 all introns supported | B31 5′ end at a refTSS peak | SIRV F1 |
+    |---|---|---|---|---|---|---|---|---|---|---|
+    | v2.1.7 | 28,500 | 0.8005 | 0.8676 | 3,771 | 68,196 | 84.4% | 92.6% | 85.0% | 73.5% | 0.772 |
+    | with the first form of the 5′ rule | 28,277 | 0.8052 | 0.8788 | 3,426 | 71,180 | 90.0% | 97.2% | 85.5% | 73.8% | 0.790 |
+    | v2.1.8 (start codons keep nothing apart) | 27,534 | 0.8049 | 0.9016 | 2,708 | 70,017 | 89.5% | 96.7% | 85.1% | 75.0% | 0.790 |
+
+    - Multi-exon models; B31 without the SIRV contigs. The last row includes the representative rule below (it changes no chain). From v2.1.7 to the last row the S2 strata rise or hold except the 5′-truncated isoforms (0.420 → 0.413) and the truth chains seen by one read (0.243 → 0.239).
+    - The next three points were measured with the first form of the 5′ rule.
+    - 423 of the 437 reference chains (≥ 2 carrier reads) that v2.1.7 folded as 3′ cuts are models again.
+    - By part, on B31: the reference ends alone change 68,196 → 68,116 models (HC chains 92.6% → 96.8%), wobble 2 adds 901 models, and the tie rule adds 2,163 (all-introns-supported share 86.1% → 85.5%, still above v2.1.7).
+    - With a UTR-annotated reference (GENCODE HC as `--ref` on B31) the HC chains kept rise from 94.4% to 95.8%.
+  - **Effect on the final annotation** (2026-11-12; ORF calling and the v2.1.8 finishing rerun on each model set; `ARK_BENCHMARK/q4/chain218`; pass = the final set):
+
+    | | S2 pass Sn | S2 pass Pr | S2-A pass Sn | S2-A pass Pr | B31 known CDS Sn | B31 GENCODE CDSs in pass | B31 5′ ends supported | B31 all introns supported |
+    |---|---|---|---|---|---|---|---|---|
+    | v2.1.7 | 0.7432 | 0.9034 | 0.6582 | 0.9361 | 0.7678 | 21,686 | 0.7823 | 0.7331 |
+    | 3′ rule, wobble 2, ties, first form of the 5′ rule | 0.7482 | 0.8992 | 0.6598 | 0.9280 | 0.8054 | 22,246 | 0.7781 | 0.7351 |
+    | + the representative rule below | 0.7493 | 0.8989 | 0.6607 | 0.9278 | 0.8096 | 22,316 | 0.7781 | 0.7355 |
+    | v2.1.8: + start codons keep nothing apart | 0.7488 | 0.9239 | 0.6615 | 0.9571 | 0.8055 | 22,285 | 0.7951 | 0.7270 |
+
+    - v2.1.7 → v2.1.8: sensitivity and precision rise on both simulations, and on B31 the final set gains 599 GENCODE CDSs and 1.9% models (41,225 → 42,014).
+    - By part (models a part adds, looked up in the final annotation; GENCODE CDSs in pass gained / lost on B31): wobble 2 +314 / −40; the tie rule +226 / 0; the 3′ rule +60 / −12; the first form of the 5′ rule +13 / −11. On S2 wobble 2 brings 81 new pass CDSs, of which 61 are truth.
+    - The last step (second to third row), the price of the precision: S2 637 fewer pass models, 613 of them false; B31 1,087 fewer pass models, known CDS Sn 0.8096 → 0.8055, GENCODE CDSs in pass +22 / −53, GENCODE CDSs carried by pass +4, annotated chains 43.7% → 42.1%, all introns supported 0.7355 → 0.7270. The models a start codon kept apart are annotated chains whose 5′ ends are mostly unsupported (13% at a supported TSS, against 78% overall) and that add no CDS on real data.
+    - The shipped binary reproduces the model sets of the third row byte for byte (S2, S2-A, B31; `scripts/c218_verify.sbatch`).
+  - 0.1.3 reproduces every `07B_RECONSTRUCT` gold file of both entrypoints (the gold gains the two new tables below). Needs collapse 0.1.3 in `isox-rs:latest`.
+- **`collapse chain` 0.1.3: a representative that holds the reference CDS; per-sample support and a unique-intron table as new outputs.** No new parameter.
+  - **Why (three-reviewer follow-up of the audit above, `reports/2026-11-11_collapse_chain_improvements_consensus.md`):** a model is its representative read, chosen closest to the consensus ends (5′: most upstream after trimming 10%; 3′: the mode). Where the reference is CDS-only, those ends can fall inside the CDS: on B31, for 217 TOGA2 CDSs at least two full-chain reads of a kept model hold the whole CDS and the representative does not. 70 of the 122 moved 3′ ends were at a genomic A-run inside the CDS.
+  - **Rule (step 8):** when the chain starts (ends) with the first (last) intron of a reference row that has no UTR on that side, the representative misses the first or last coding base, and at least 2 full-chain reads hold both, the representative is the one of those closest to the consensus ends. Only the representative changes: `five_prime` / `three_prime` in `support.tsv`, and what steps 5 and 11 judge, are still the consensus ends.
+  - **07B effect** (against the row "v2.1.8" above, same inputs): S2 28,277 → 28,278 models, false positives 3,426 = 3,426, truth CDSs carried intact 0.9756 → 0.9797. B31 71,180 → 71,178 models, GENCODE CDSs carried intact 34,748 → 34,826 of 38,325 (0.9067 → 0.9087), TOGA2 CDSs 20,543 → 20,647; 5′ ends at a refTSS peak and 3′ ends at a polyA signal unchanged (0.738, 0.662). The representative changes in 0.2% of models.
+  - **`<prefix>.samples.tsv`** (`model`, `name`, `sample`, `n_reads`, `n_full`, `n_full_molecules`; `name` is the model's BED name): the support of every model per input file. One `--bed` file is one sample, named by its file name without `.bed`. With one input file it repeats `support.tsv`; with the BEDs of several samples in one call it is the per-sample presence list of a pooled reconstruction (21 MB for five brains, against 1.24 GB for `members.tsv`).
+  - **`<prefix>.introns.tsv`** (`chrom`, `start`, `end`, `strand`, `n_reads`, `annotated`): every distinct intron of the input reads after junction correction, once, with the reads that carry it. On B31 339,819 rows stand for 32,293,413 read-introns. Nothing reads it yet: the intron classification still extracts introns per read.
+  - `CHAIN_COLLAPSE` emits both as `tables` (optional, so an `isox-rs` image with an older collapse still runs). CI gold: the two files are added for both entrypoints; every other gold file is reproduced.
+- **`cluster_mode pooled`: one model set from the reads of every sample.** New mode (any entrypoint; needs `global_prefix` and `reconstruct_engine chain`); the existing modes are untouched and `cluster_mode` still defaults to `both`.
+  - **What it does:** every sample is aligned, segmented and fusion-checked alone. At reconstruction the reads of all samples of one [chromosome, class] go to one `collapse chain` call (one BED per sample, read names `<sample>.<read>`; new module `GAWK_POOL`), and the model set flows on as one sample named `global_prefix`, so ORF calling and POLISH run once. `samples.tsv` lists the reads of every model per sample.
+  - **`reconstruct_sample_read_fraction`** (default `false`; `collapse chain --sample-read-fraction`): a novel model below the read fraction of the pool stays when it holds the fraction among the locus reads of one sample.
+  - **Measured** (four mouse brains pooled, a fifth held out; final annotation, `ARK_BENCHMARK/q4/chain218/P4`):
+    - Final set of the pool: 74,480 models with 30,529 distinct GENCODE CDSs. One of the four brains alone: 43,895 models, 22,415 GENCODE CDSs.
+    - That brain's own view of the pool (final models with at least one of its full-chain reads) holds 25,594 GENCODE CDSs: 3,997 it does not reach alone, while 818 of its own are missing from the view.
+    - Share of final chains estimated real from the held-out animal: 0.941 for the pool, 0.902 for the brain alone.
+    - ORF calling costs the same per model (5.2 CPU-s at 100 models per chunk), so the pool costs what its distinct models cost: about 55% of four separate runs (161,009 models against about 75,000 per brain).
+    - With `reconstruct_sample_read_fraction true`: 4,768 more final models, GENCODE CDSs in pass +1,340 / −92, estimated real chains +3,955; all-introns-supported share 0.789 → 0.761, estimated real share 0.941 → 0.934. Off by default because of the last two.
+  - CI: three pooled cases in `assets/ci/test_isoseq.py`; gold `samples.tsv` regenerated (new column).
+- **`reconstruct_cds_pool`** (default `false`; `collapse chain --cds-pool`): chains that are each short of support but whose representatives hold the same reference CDS intact, held by no kept model, count their molecules together; the chain with the fewest unannotated introns is kept as a known chain (flag `cds_pooled` in `support.tsv`). These are one coding transcript behind different UTR structures.
+  - **Measured on the final annotation** (on top of the second row of the table above): B31 GENCODE CDSs in pass +119 / 0, all introns supported 0.7355 → 0.7345; four-brain pool +106 / −3; S2 +5 true and 1 false pass model; S2-A 11 true of 13 added.
+  - With the v2.1.8 default it adds 242 models at 07B on B31 and 6 on S2 (Sn 0.8049 → 0.8051, 1 more false positive). That combination has not been through ORF calling, so the option is off.
+  - The other four rules of the combined candidate (`reports/2026-11-11_collapse_chain_improvements_consensus.md` 5.2 D) and the read fraction 0.995 were measured the same way and are not shipped: none is a gain on every metric.
+- **`xorf_chunk_size` 10 → 1,000** (transcript models per ORF-calling chunk). `orf blast` runs DIAMOND once per chunk, and DIAMOND loads Swiss-Prot again in every call: about 260 CPU-s per chunk whatever it holds.
+  - **Measured, 1,000 against 100 per chunk:** B31 (78,015 structures) 60.0 against 117.4 CPU-h and 1,002 against 5,178 tasks, with the same ORF coordinates in all 73,577 final rows (2 rows carry a score label 1–2 points lower; the same run-to-run noise as between two runs of equal chunks). S2-A 12.9 against 25.5 CPU-h, identical final ORF calls. At 10 per chunk B31 projects to at least 630 CPU-h.
+  - Longest task 53 min (TranslationAI) and 3.5 GB peak (`orf blast`), within the shipped limits. The CI keeps its own value (2).
+- **Correction to the v2.1.7 note on `--subchain-known-needs-ends`.** The B31 models it folds were called "as TSS-supported as the rest" with a metric that counts a TOGA2 5′ end (a start codon) as an annotated TSS. With refTSS alone, 24% of them are supported, against 75% of the rest. The flag stays opt-in for another reason: it also folds 1,901 reference-chain models that span the reference CDS.
+
 ## [v2.1.7] - 2026-11-10
 
 - **New sub-chain merge in `collapse chain` 0.1.2 (`--subchain-merge`), on in ARK by default (`reconstruct_subchain_merge = true`).**
